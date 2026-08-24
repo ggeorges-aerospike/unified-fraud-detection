@@ -11,6 +11,7 @@ Used for:
 
 import logging
 import math
+import time
 import os
 import csv
 import zlib
@@ -1925,6 +1926,42 @@ class AerospikeService:
             logger.error(f"Error batch getting transactions: {e}")
             return result
     
+    def get_latest_transaction_day(self, max_age_seconds: int = 60) -> Optional[str]:
+        """The most recent ``day`` present in the transactions set, or None.
+
+        The transactions list walks back a fixed window of recent days, which
+        finds nothing when the newest data is older than that window — a demo
+        stack reopened weeks after its data was generated shows an empty
+        Transaction Explorer while the stats tile still counts every record.
+        This is the fallback for that case.
+
+        Only the ``day`` bin is fetched, and the answer is cached briefly, since
+        this walks the set.
+        """
+        cached = getattr(self, "_latest_txn_day_cache", None)
+        if cached and (time.time() - cached[0]) < max_age_seconds:
+            return cached[1]
+        if not self.is_connected():
+            return None
+        latest = None
+        try:
+            scan = self.client.scan(self.namespace, SET_TRANSACTIONS)
+            scan.select('day')
+
+            def _track(record):
+                nonlocal latest
+                bins = record[2] or {}
+                day = bins.get('day')
+                if day and (latest is None or day > latest):
+                    latest = day
+
+            scan.foreach(_track)
+        except Exception as e:
+            logger.warning(f"Could not determine latest transaction day: {e}")
+            return None
+        self._latest_txn_day_cache = (time.time(), latest)
+        return latest
+
     def get_transactions_by_day(self, day: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
         """
         Get all transactions for a specific day using secondary index query.

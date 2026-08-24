@@ -691,6 +691,14 @@ def get_transactions(
             results = aerospike_service.get_transactions_by_day(candidate, page, page_size)
             if results.get("total", 0) > 0:
                 return results
+        # Nothing in the recent window. The data can simply be older than the
+        # window — a demo reopened weeks after its transactions were generated —
+        # so fall back to the newest day that actually has any, rather than
+        # showing an empty explorer next to a stats tile counting thousands.
+        latest_day = aerospike_service.get_latest_transaction_day()
+        if latest_day:
+            return aerospike_service.get_transactions_by_day(latest_day, page, page_size)
+
         return results if results is not None else aerospike_service.get_transactions_by_day(
             base.strftime('%Y-%m-%d'), page, page_size
         )
