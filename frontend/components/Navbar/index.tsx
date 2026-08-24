@@ -8,15 +8,24 @@ import { Activity, LogOut } from 'lucide-react'
 import { ThemeProvider } from 'next-themes'
 import clsx from 'clsx'
 import { Button } from '@/components/ui/button'
+import { useAppConfig } from '@/hooks/useAppConfig'
 
-const navigation: { name: string; href: string; disabled?: boolean }[] = [
+const navigation: {
+  name: string
+  href: string
+  disabled?: boolean
+  remoteOnlyDisabled?: boolean
+}[] = [
   // { name: 'Dashboard', href: '/' },
   { name: 'Users', href: '/users' },
   { name: 'Transactions', href: '/transactions' },
   { name: 'Flagged Accounts', href: '/flagged' },
   // { name: 'Fraud Patterns', href: '/fraud-patterns' },
   // { name: 'Graph View', href: '/graph' },
-  { name: 'Admin', href: '/admin', disabled: true },
+  // Admin is disabled in remote load-gen mode, where the ingest/clear operations
+  // it exposes are performed externally and the backend rejects them with 409.
+  // In local mode every capability is available, so the menu stays live.
+  { name: 'Admin', href: '/admin', remoteOnlyDisabled: true },
   { name: 'API Docs', href: '/docs' },
   { name: 'Zipkin', href: '/tracing', disabled: true },
 ]
@@ -24,6 +33,8 @@ const navigation: { name: string; href: string; disabled?: boolean }[] = [
 export default function Navbar() {
   	const pathname = usePathname()
   	const router = useRouter()
+  	const { config } = useAppConfig()
+  	const isRemote = config?.remote ?? false
 
   	// The login page renders its own centered layout — no nav chrome.
   	if (pathname === '/login') return null
@@ -46,7 +57,7 @@ export default function Navbar() {
               				</Link>
               				<div className="hidden md:flex space-x-4">
 							{navigation.map((item) =>
-								item.disabled ? (
+								item.disabled || (item.remoteOnlyDisabled && isRemote) ? (
 									<span
 										key={item.name}
 										className="px-3 py-2 rounded-md text-sm font-medium text-muted-foreground/40 cursor-not-allowed select-none"
