@@ -73,16 +73,45 @@ class TestActionCore(unittest.TestCase):
 
 class TestLLMConfig(unittest.TestCase):
     def test_defaults(self):
-        from workflow.llm import LLMConfig
+        from workflow.llm import PROVIDERS, LLMConfig
 
         cfg = LLMConfig.from_env()
-        self.assertIn(cfg.provider, ("gemini", "ollama"))
+        self.assertIn(cfg.provider, PROVIDERS)
 
     def test_ollama_adk_model_string(self):
         from workflow.llm import LLMConfig, resolve_adk_model
 
         cfg = LLMConfig(provider="ollama", ollama_model="mistral")
         self.assertEqual(resolve_adk_model(cfg), "ollama/mistral")
+
+    def test_vllm_from_env(self):
+        import os
+        from unittest.mock import patch
+
+        from workflow.llm import VLLM, LLMConfig, describe
+
+        env = {
+            "LLM_PROVIDER": "vllm",
+            "VLLM_BASE_URL": "http://vllm:8000/v1",
+            "VLLM_MODEL": "Qwen/Qwen3-8B",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = LLMConfig.from_env()
+        self.assertEqual(cfg.provider, VLLM)
+        self.assertEqual(cfg.vllm_base_url, "http://vllm:8000/v1")
+        self.assertIn("Qwen/Qwen3-8B", describe(cfg))
+
+    def test_vllm_adk_model_carries_the_base_url(self):
+        from workflow.llm import LLMConfig, resolve_adk_model
+
+        cfg = LLMConfig(provider="vllm", vllm_model="Qwen/Qwen3-8B",
+                        vllm_base_url="http://vllm:8000/v1")
+        try:
+            model = resolve_adk_model(cfg)
+        except ImportError:
+            self.skipTest("google-adk not installed")
+        # LiteLlm instance, so ADK routes to the OpenAI-compatible endpoint.
+        self.assertEqual(model.model, "openai/Qwen/Qwen3-8B")
 
 
 class TestSSEContractHelpers(unittest.TestCase):

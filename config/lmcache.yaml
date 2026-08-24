@@ -1,0 +1,38 @@
+# LMCache configuration for the fraud-investigation POC.
+#
+# Tiering: L1 GPU (vLLM's own paged KV) → L2 pinned host DRAM → L3 remote.
+# The remote tier is Aerospike, via LMCache's native Aerospike connector.
+#
+# Connector defaults, and the env vars that override them, are documented in
+# docs/lmcache-aerospike.md. Anything set in the environment
+# (LMCACHE_AEROSPIKE_*) wins over the values here, which is how docker-compose
+# points this at the `aerospike-db` service.
+
+chunk_size: 256          # tokens per KV chunk — LMCache's default
+local_cpu: true          # L2: pinned host DRAM
+max_local_cpu_size: 20   # GiB of host DRAM for L2. Keep this well clear of the
+                         # primary-index RAM if a block-index run shares the box.
+local_disk: null         # no L3 local-disk tier; remote goes straight to Aerospike
+
+# Remote tier — Aerospike.
+remote_url: "aerospike://aerospike-db:3000"
+remote_serde: "naive"
+
+extra_config:
+  # Seed list; host:port[,host:port…]
+  aerospike_hosts: "aerospike-db:3000"
+  # Namespace MUST exist and MUST have nsup-period > 0, or nothing expires and
+  # the namespace fills until stop-writes trips. See config/aerospike.conf.
+  aerospike_namespace: "lmcache"
+  aerospike_set_name: "kv_chunks"
+  # C++ I/O worker threads — this is the real I/O queue depth. Raise for throughput.
+  aerospike_num_workers: 8
+  aerospike_read_timeout_ms: 1000
+  aerospike_write_timeout_ms: 2000
+  # Per-record TTL on write; 0 falls back to the namespace default-ttl.
+  aerospike_default_ttl_seconds: 86400
+  # 0 = auto-discover the server's record cap and shard payload segments to fit.
+  aerospike_target_segment_bytes: 0
+  aerospike_max_record_bytes: 0
+  # > 0 enables client-side capacity tracking (and therefore client-side eviction).
+  aerospike_max_capacity_gb: 0

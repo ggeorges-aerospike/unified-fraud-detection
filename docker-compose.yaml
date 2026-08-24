@@ -2,8 +2,15 @@ services:
   aerospike-db:
     image: aerospike/aerospike-server-enterprise:8.0.0.7
     container_name: aerospike-db
+    # Mounted OUTSIDE /etc/aerospike on purpose: the image entrypoint renders
+    # /etc/aerospike/aerospike.template.conf over /etc/aerospike/aerospike.conf on
+    # every fresh container, so a file bind-mounted at that path is silently
+    # overwritten (host side too) before asd starts — i.e. it was never applied.
+    # Mounting elsewhere read-only and pointing asd at it makes this file
+    # authoritative, which is what gives us the `lmcache` namespace.
     volumes:
-      - ./config/aerospike.conf:/etc/aerospike/aerospike.conf
+      - ./config/aerospike.conf:/opt/aerospike/etc/aerospike.conf:ro
+    command: ["--config-file", "/opt/aerospike/etc/aerospike.conf"]
     healthcheck:
       test: ["CMD", "asinfo", "-p", "3000", "-v", "build"]
       interval: 5s
@@ -51,6 +58,57 @@ services:
       interval: 5s
       timeout: 10s
       retries: 4
+  # vLLM on ROCm with LMCache in front and Aerospike as LMCache's remote KV tier.
+  # Requires an AMD Instinct host and an image that has the Aerospike connector
+  # compiled/installed — stock vLLM and LMCache images do not. Build it first:
+  #   docker build -f vllm.Dockerfile -t lmcache-aerospike/vllm-openai:rocm .
+  # Then run only this profile:
+  #   docker compose --profile vllm up vllm
+  # Full runbook: docs/lmcache-aerospike.md
+  vllm:
+    profiles: ["vllm"]
+    image: ${VLLM_IMAGE:-lmcache-aerospike/vllm-openai:rocm}
+    container_name: asgraph-vllm
+    depends_on:
+      aerospike-db:
+        condition: service_healthy
+    # ROCm device access (AMD's own vLLM tutorials use exactly these).
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    security_opt:
+      - seccomp:unconfined
+    group_add:
+      - video
+    ipc: host
+    shm_size: 16gb
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - LMCACHE_CONFIG_FILE=/etc/lmcache/lmcache.yaml
+      # Env overrides read by the Aerospike connector itself.
+      - LMCACHE_AEROSPIKE_HOSTS=${LMCACHE_AEROSPIKE_HOSTS:-aerospike-db:3000}
+      - LMCACHE_AEROSPIKE_NAMESPACE=${LMCACHE_AEROSPIKE_NAMESPACE:-lmcache}
+      - LMCACHE_AEROSPIKE_SET=${LMCACHE_AEROSPIKE_SET:-kv_chunks}
+      - LMCACHE_AEROSPIKE_USERNAME=${LMCACHE_AEROSPIKE_USERNAME:-}
+      - LMCACHE_AEROSPIKE_PASSWORD=${LMCACHE_AEROSPIKE_PASSWORD:-}
+    volumes:
+      - ./config/lmcache.yaml:/etc/lmcache/lmcache.yaml:ro
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface
+    command:
+      - '--model=${VLLM_MODEL:-Qwen/Qwen3-8B}'
+      - '--served-model-name=${VLLM_MODEL:-Qwen/Qwen3-8B}'
+      - '--port=8000'
+      - '--max-model-len=${VLLM_MAX_MODEL_LEN:-32768}'
+      - '--kv-transfer-config={"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    networks:
+      - asgraph_net
+    ports:
+      - "8000:8000"
   backend:
     build:
       context: .
@@ -70,9 +128,17 @@ services:
       - INVESTIGATION_ENGINE=${INVESTIGATION_ENGINE:-adk}
       - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       - ADK_MODEL=${ADK_MODEL:-gemini-3.1-flash-lite}
+      # Run the three evidence specialists concurrently (ADK ParallelAgent)
+      - ADK_PARALLEL_EVIDENCE=${ADK_PARALLEL_EVIDENCE:-true}
       # Optional: host Ollama when LLM_PROVIDER=ollama (not part of compose)
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral}
+      # Optional: vLLM when LLM_PROVIDER=vllm (compose profile `vllm`, or a host/remote server)
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm:8000/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-8B}
+      - VLLM_API_KEY=${VLLM_API_KEY:-EMPTY}
+      # ReAct prompt block order: current (default) | stable_first
+      - PROMPT_LAYOUT=${PROMPT_LAYOUT:-current}
     volumes:
       - ./data:/data
     healthcheck:

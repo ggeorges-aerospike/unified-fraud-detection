@@ -144,11 +144,13 @@ class InvestigationService:
         status: str,
     ) -> Dict[str, Any]:
         completed_at = datetime.now().isoformat()
-        completed_steps = (
-            ["alert_validation", "data_collection", "llm_agent", "report_generation"]
-            if status == "completed"
-            else ["alert_validation", "data_collection", "llm_agent"]
-        )
+        # The report is written BEFORE the action_taker pauses for approval, so an
+        # `awaiting_confirmation` record has a finished report too. Hardcoding three
+        # steps here left the UI spinning on "Report Generation" forever when the
+        # analyst came back to a paused investigation.
+        completed_steps = ["alert_validation", "data_collection", "llm_agent"]
+        if status == "completed" or final_state.get("report_markdown"):
+            completed_steps.append("report_generation")
         payload = {
             "investigation_id": investigation_id,
             "user_id": user_id,
@@ -477,7 +479,36 @@ class InvestigationService:
 
     def has_pending_action(self, investigation_id: str) -> bool:
         """Whether the investigation is paused awaiting analyst approval."""
-        return investigation_id in self._pending_confirmations
+        return self._pending_action(investigation_id) is not None
+
+    def _pending_action(self, investigation_id: str) -> Optional[Dict[str, Any]]:
+        """The paused action, from memory or — after a restart — from the KV record.
+
+        ``_pending_confirmations`` is process-local, so without this fallback a
+        backend restart strands every paused investigation: the analyst's approval
+        returns "No pending action to confirm" and the disposition is never saved.
+        Everything the resume needs (the confirmation call id, decision, account) is
+        already persisted in the record's ``pending_action``, and the ADK session
+        itself lives in Aerospike.
+        """
+        pending = self._pending_confirmations.get(investigation_id)
+        if pending:
+            return pending
+        if not (self.aerospike_service and self.aerospike_service.is_connected()):
+            return None
+        record = self.aerospike_service.get_investigation(investigation_id) or {}
+        if record.get("status") != "awaiting_confirmation":
+            return None
+        stored = record.get("pending_action") or {}
+        if not stored.get("fc_id"):
+            return None
+        user_id = stored.get("user_id") or record.get("user_id")
+        if not user_id:
+            return None
+        logger.info(
+            "Rehydrated pending action for %s from KV (fc=%s)", investigation_id, stored.get("fc_id")
+        )
+        return {**stored, "user_id": user_id}
 
     async def resume_investigation_action(
         self,
@@ -486,7 +517,7 @@ class InvestigationService:
         override: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Resume a paused investigation after analyst approves/rejects the action."""
-        pending = self._pending_confirmations.get(investigation_id)
+        pending = self._pending_action(investigation_id)
         if not pending:
             yield {
                 "event": "error",

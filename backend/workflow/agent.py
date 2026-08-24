@@ -29,7 +29,7 @@ import os
 import logging
 from typing import Any
 
-from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.agents import LlmAgent, ParallelAgent, SequentialAgent
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types
@@ -49,7 +49,7 @@ from workflow.tools.investigation_tools_adk import (
     detect_fraud_ring,
     get_transaction_network,
 )
-from workflow.action_tools import enact_decision
+from workflow.action_tools import enact_decision, enact_decision_tool
 from workflow.specialists import (
     NETWORK_ANALYST_NAME,
     DEVICE_ANALYST_NAME,
@@ -65,6 +65,31 @@ logger = logging.getLogger('investigation.agent')
 DEFAULT_MODEL = os.environ.get("ADK_MODEL", "gemini-3.5-flash")
 
 APP_NAME = "fraud_investigation"
+
+# Run the three evidence specialists concurrently (ADK ParallelAgent) or one after
+# another (SequentialAgent). Concurrency is the point of the stage — three domains
+# examined at once — so it is the default; `ADK_PARALLEL_EVIDENCE=false` is the
+# escape hatch if ADK's parallel branch misbehaves again (see build_investigation_agent).
+PARALLEL_EVIDENCE = (os.environ.get("ADK_PARALLEL_EVIDENCE", "true").strip().lower()
+                     not in ("false", "0", "no"))
+
+# Output budget for the tool-using agents. This has to cover the model's THINKING
+# tokens as well as the visible answer: at 800 the specialists were spending ~768
+# on thinking and finishing with MAX_TOKENS after ~30 tokens of text, so their
+# "3-6 bullet points" findings arrived as mid-sentence fragments (and the
+# investigator's synthesis was truncated the same way). Thinking is capped at LOW
+# so the extra headroom buys output, not latency.
+AGENT_MAX_TOKENS = int(os.environ.get("ADK_AGENT_MAX_TOKENS", "2000"))
+THINKING_LEVEL = os.environ.get("ADK_THINKING_LEVEL", "low").strip().upper()
+
+
+def _gen_config(temperature: float, max_tokens: int = None) -> types.GenerateContentConfig:
+    """Generation config for a tool-using agent, with a bounded thinking budget."""
+    return types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens or AGENT_MAX_TOKENS,
+        thinking_config=types.ThinkingConfig(thinking_level=THINKING_LEVEL),
+    )
 
 INVESTIGATOR_NAME = "investigator"
 REPORT_WRITER_NAME = "report_writer"
@@ -235,7 +260,7 @@ def _build_specialist(name: str, model: str) -> LlmAgent:
         instruction=_make_specialist_instruction(name),
         tools=_ADK_SPECIALIST_TOOLS[name],
         output_key=SPECIALIST_OUTPUT_KEYS[name],
-        generate_content_config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=800),
+        generate_content_config=_gen_config(0.2),
         # Leaf agents in the ParallelAgent — no transfer.
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -251,16 +276,21 @@ def build_investigation_agent(model: str = None) -> SequentialAgent:
     # findings summary to session state via its output_key; the investigator then
     # reads all three.
     #
-    # NOTE: this is a SequentialAgent, not a ParallelAgent. ADK's ParallelAgent
-    # runs the sub-agents inside an asyncio.TaskGroup, and on graph-heavy accounts
-    # (where the network analyst's gremlin traversals are slow) the group is torn
-    # down while a branch is still in flight. ADK's OpenTelemetry span context
-    # tokens then get detached in the wrong asyncio context ("Token was created in
-    # a different Context"), and the resulting GeneratorExit blows the TaskGroup up
-    # as a BaseExceptionGroup — killing the whole run ("stuck at N tool calls").
-    # Running the specialists sequentially removes that TaskGroup entirely, which
-    # is the only reliable way to avoid the crash with the current ADK version.
-    evidence_collection = SequentialAgent(
+    # ADK's ParallelAgent merges the sub-agent event streams through an
+    # asyncio.TaskGroup. On google-adk <= 1.36 that group could be torn down while
+    # a branch was still in flight on graph-heavy accounts (slow gremlin traversals
+    # in the network analyst): OpenTelemetry span tokens got detached in the wrong
+    # asyncio context ("Token was created in a different Context") and the
+    # resulting GeneratorExit surfaced as a BaseExceptionGroup that killed the run
+    # ("stuck at N tool calls"). The stage was made sequential to avoid it.
+    #
+    # 1.39 finalises the merged generator with `Aclosing(...)`, so the branch is
+    # closed properly and parallel is viable again. Kept behind a flag because the
+    # failure mode was load- and data-dependent: if it returns, set
+    # ADK_PARALLEL_EVIDENCE=false and the stage degrades to sequential without any
+    # other change (all three specialists map to the same SSE step either way).
+    stage_cls = ParallelAgent if PARALLEL_EVIDENCE else SequentialAgent
+    evidence_collection = stage_cls(
         name=EVIDENCE_COLLECTION_NAME,
         sub_agents=[_build_specialist(n, model) for n in SPECIALIST_NAMES],
         description="Gather network, device, and velocity evidence on the flagged account.",
@@ -271,7 +301,7 @@ def build_investigation_agent(model: str = None) -> SequentialAgent:
         model=model,
         instruction=_investigator_instruction,
         tools=INVESTIGATION_TOOLS,  # assesses only; enacting happens later
-        generate_content_config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=800),
+        generate_content_config=_gen_config(0.2),
         # The investigator owns its turn; no transfer to peers/parent.
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -294,7 +324,16 @@ def build_investigation_agent(model: str = None) -> SequentialAgent:
         name=ACTION_TAKER_NAME,
         model=model,
         instruction=_action_taker_instruction,
-        tools=[enact_decision],
+        # Statically declared confirmation — NOT just the dynamic
+        # tool_context.request_confirmation() inside the tool. ADK validates a
+        # resumed confirmation by looking for the tool's function-RESPONSE event
+        # carrying actions.requested_tool_confirmations, and it never appends that
+        # event when a confirmation is pending, so a dynamic-only request fails on
+        # resume with "Tool 'enact_decision' does not require confirmation" (404 on
+        # /resume, disposition silently not saved). check_require_confirmation()
+        # on the tool is the check that survives the round trip through the
+        # session store.
+        tools=[enact_decision_tool()],
         generate_content_config=types.GenerateContentConfig(temperature=0.0),
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
@@ -305,5 +344,8 @@ def build_investigation_agent(model: str = None) -> SequentialAgent:
         sub_agents=[evidence_collection, investigator, report_writer, action_taker],
         description="Gather evidence in parallel, assess, write the report, then enact the decision.",
     )
-    logger.info(f"Built ADK investigation agent (model={model}, sequential evidence + post-report action)")
+    logger.info(
+        "Built ADK investigation agent (model=%s, evidence=%s, post-report action)",
+        model, "parallel" if PARALLEL_EVIDENCE else "sequential",
+    )
     return agent

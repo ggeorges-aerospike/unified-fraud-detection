@@ -1,13 +1,13 @@
 """
-Gemini access health-check.
+LLM access health-checks (Gemini, and the OpenAI-compatible vLLM endpoint).
 
-Runs a single minimal ``generateContent`` call at startup to verify the
-configured API key and model are actually reachable — so a misconfigured key,
-disabled API, restricted key, or unavailable model surfaces immediately in the
-logs instead of mid-investigation.
+Both checks run once at startup so a misconfigured key, disabled API, wrong model
+id, or an inference server that is not up surfaces immediately in the logs instead
+of mid-investigation.
 
-Uses the same SDK (``google-genai``) and the same Gemini Developer API that ADK
-uses when ``GOOGLE_GENAI_USE_VERTEXAI=FALSE``.
+Gemini uses the same SDK (``google-genai``) and the same Gemini Developer API that
+ADK uses when ``GOOGLE_GENAI_USE_VERTEXAI=FALSE``. The vLLM check lists
+``/v1/models`` on the OpenAI-compatible endpoint.
 """
 
 import os
@@ -75,6 +75,52 @@ async def log_gemini_health(model: str) -> bool:
         logger.info(f"✅ Gemini access OK (model={model})")
         return True
     logger.warning("⚠️  Gemini access check FAILED — investigations will fall back to deterministic assessment.")
+    logger.warning(f"    Reason: {result['error']}")
+    if result.get("hint"):
+        logger.warning(f"    Fix:    {result['hint']}")
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# vLLM / OpenAI-compatible endpoint (Phase 1 of the LMCache POC)
+# ─────────────────────────────────────────────────────────────────────────────
+async def check_vllm_access(base_url: str, model: str, api_key: str = "EMPTY") -> Dict[str, Any]:
+    """List models on an OpenAI-compatible endpoint and confirm ``model`` is served."""
+    import httpx
+
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                url, headers={"Authorization": f"Bearer {api_key}"} if api_key else {}
+            )
+            resp.raise_for_status()
+            served = [m.get("id") for m in (resp.json().get("data") or [])]
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "hint": (f"No OpenAI-compatible endpoint answering at {url}. Start vLLM "
+                     f"(docker compose --profile vllm up vllm) or fix VLLM_BASE_URL."),
+        }
+
+    if served and model not in served:
+        return {
+            "ok": False,
+            "error": f"model '{model}' is not served (available: {', '.join(served) or 'none'})",
+            "hint": "Set VLLM_MODEL to one of the served ids, or start vLLM with --served-model-name.",
+            "served": served,
+        }
+    return {"ok": True, "error": None, "hint": None, "model": model, "served": served}
+
+
+async def log_vllm_health(base_url: str, model: str, api_key: str = "EMPTY") -> bool:
+    """Run the vLLM check and log an actionable result. Returns True if healthy."""
+    result = await check_vllm_access(base_url, model, api_key)
+    if result["ok"]:
+        logger.info(f"✅ vLLM endpoint OK (model={model} @ {base_url})")
+        return True
+    logger.warning("⚠️  vLLM endpoint check FAILED — investigations will fall back to deterministic assessment.")
     logger.warning(f"    Reason: {result['error']}")
     if result.get("hint"):
         logger.warning(f"    Fix:    {result['hint']}")

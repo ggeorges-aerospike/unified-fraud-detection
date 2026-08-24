@@ -20,6 +20,13 @@ import httpx
 from workflow.assessment import build_evidence_summary, deterministic_assessment
 from workflow.llm import LLMConfig
 from workflow.metrics import MetricsCollector
+from workflow.prompt_layout import (
+    default_hint,
+    history_block,
+    render_react_prompt,
+    status_lines,
+    tool_lines,
+)
 from workflow.state import AgentMessage, FinalAssessment, ToolCall, TraceEvent
 from workflow.tools.investigation_tools import InvestigationTools
 
@@ -53,6 +60,32 @@ def _call_ollama(base_url: str, model: str, prompt: str) -> str:
         return response.json().get("response", "")
 
 
+def _call_openai_compatible(base_url: str, model: str, api_key: str, prompt: str) -> str:
+    """Chat-completions call against an OpenAI-compatible endpoint (vLLM on ROCm).
+
+    The whole ReAct prompt goes in a single user message so the served engine's
+    prefix cache — and LMCache/Aerospike behind it — sees one stable byte stream
+    per iteration. See ``workflow/prompt_layout.py`` for why block order matters.
+    """
+    with httpx.Client(timeout=600.0) as client:
+        response = client.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 800,
+                "stream": False,
+            },
+        )
+        response.raise_for_status()
+        choices = response.json().get("choices", [])
+        if choices:
+            return (choices[0].get("message") or {}).get("content", "") or ""
+    return ""
+
+
 def _call_gemini(api_key: str, model: str, prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     with httpx.Client(timeout=300.0) as client:
@@ -77,6 +110,13 @@ def call_llm(prompt: str, llm_config: LLMConfig) -> str:
     """Invoke the configured LLM synchronously."""
     if llm_config.provider == "ollama":
         return _call_ollama(llm_config.ollama_base_url, llm_config.ollama_model, prompt)
+    if llm_config.provider == "vllm":
+        return _call_openai_compatible(
+            llm_config.vllm_base_url,
+            llm_config.vllm_model,
+            llm_config.vllm_api_key,
+            prompt,
+        )
     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is required for Gemini provider")
@@ -141,16 +181,6 @@ def _balanced_brace_json(text: str) -> dict:
     return json.loads(text[start_idx:end_idx])
 
 
-def _history_block(messages: List[AgentMessage]) -> str:
-    lines = []
-    for msg in messages:
-        if msg["role"] == "assistant":
-            lines.append(f"\nAssistant: {msg['content'][:500]}")
-        elif msg["role"] == "tool":
-            lines.append(f"\nTool Result ({msg.get('tool_name', 'unknown')}): {msg['content'][:1200]}")
-    return "".join(lines) if lines else "(First iteration - no history yet)"
-
-
 def build_json_tool_prompt(
     system: str,
     evidence: str,
@@ -162,40 +192,24 @@ def build_json_tool_prompt(
     max_tool_calls: int,
     submit_hint: str = "",
 ) -> str:
-    """Build a ReAct prompt that expects a single JSON tool call."""
-    schemas = InvestigationTools.TOOL_SCHEMAS
-    allowed = {s["name"] for s in schemas if s["name"] in tool_names or s["name"] == "submit_assessment"}
-    tool_lines = []
-    for schema in schemas:
-        if schema["name"] not in allowed:
-            continue
-        params = ", ".join(f'"{k}": ...' for k in schema.get("parameters", {}))
-        tool_lines.append(f'- {schema["name"]}: {schema["description"]} params {{{params}}}')
+    """Build a ReAct prompt that expects a single JSON tool call.
 
-    hint = submit_hint or (
-        "Respond with ONLY a JSON object: "
-        '{"tool": "<name>", "params": {...}}'
+    Block assembly and ordering live in :mod:`workflow.prompt_layout` so the
+    prefix-reuse benchmark measures the exact prompts this function produces.
+    """
+    return render_react_prompt(
+        system=system,
+        evidence=evidence,
+        tool_lines=tool_lines(InvestigationTools.TOOL_SCHEMAS, tool_names),
+        history=history_block(messages),
+        status_lines=status_lines(
+            iteration=iteration,
+            max_iterations=max_iterations,
+            tool_calls_used=len(tool_calls),
+            max_tool_calls=max_tool_calls,
+            hint=default_hint(iteration, max_iterations, submit_hint),
+        ),
     )
-    if iteration >= max_iterations - 1:
-        hint = "You are at the iteration limit. Call submit_assessment now if available."
-
-    return f"""{system}
-
-## CASE EVIDENCE
-{evidence}
-
-## TOOLS (JSON format only)
-{chr(10).join(tool_lines)}
-
-## STATUS
-- Iteration: {iteration}/{max_iterations}
-- Tool calls: {len(tool_calls)}/{max_tool_calls}
-- {hint}
-
-## CONVERSATION
-{_history_block(messages)}
-
-YOUR JSON RESPONSE:"""
 
 
 def run_tool_loop(

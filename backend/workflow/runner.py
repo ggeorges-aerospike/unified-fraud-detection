@@ -230,6 +230,21 @@ async def load_investigation_snapshot(
     }
 
 
+def _confirmation_hint(decision, account_id, reason) -> str:
+    """The approval prompt shown to the analyst.
+
+    Built here rather than taken from ADK: a statically declared confirmation
+    supplies only ADK's generic "approve or reject the tool call" text.
+    """
+    if not decision or not account_id:
+        return ""
+    hint = (f"The AI agent recommends **{str(decision).replace('_', ' ')}** on account "
+            f"{account_id}.")
+    if reason:
+        hint += f" Reason: {reason}."
+    return hint + " Approve this action?"
+
+
 async def _drive_agent(
     inv_runner: InvestigationRunner,
     user_id: str,
@@ -269,14 +284,24 @@ async def _drive_agent(
                 tc = args.get("toolConfirmation") or args.get("tool_confirmation") or {}
                 tc = tc if isinstance(tc, dict) else {}
                 payload = tc.get("payload") if isinstance(tc.get("payload"), dict) else {}
+                # A statically declared confirmation (the form ADK can verify on a
+                # resumed run) carries ADK's own generic hint and no payload, so the
+                # decision comes from the original enact_decision call's arguments.
+                # `payload` remains the fallback for a dynamically requested pause.
+                original = args.get("originalFunctionCall") or args.get("original_function_call") or {}
+                orig_args = original.get("args") if isinstance(original, dict) else {}
+                orig_args = orig_args if isinstance(orig_args, dict) else {}
+                decision = orig_args.get("decision") or payload.get("decision")
+                account_id = orig_args.get("account_id") or payload.get("account_id")
+                reason = orig_args.get("reason") or payload.get("reason")
                 paused = {
                     "investigation_id": investigation_id,
                     "user_id": user_id,
                     "fc_id": fc.id,
-                    "hint": tc.get("hint", ""),
-                    "decision": payload.get("decision"),
-                    "account_id": payload.get("account_id"),
-                    "reason": payload.get("reason"),
+                    "hint": _confirmation_hint(decision, account_id, reason) or tc.get("hint", ""),
+                    "decision": decision,
+                    "account_id": account_id,
+                    "reason": reason,
                     "current_step": current_step,
                 }
                 # The report has ALREADY been written by this point (action_taker

@@ -1,14 +1,20 @@
 """
 ADK human-in-the-loop action tool.
 
-All dispositions pause via ADK ``tool_context.request_confirmation`` before
-enforcement; execution delegates to :mod:`workflow.action_core`.
+All dispositions pause for analyst approval before enforcement; execution
+delegates to :mod:`workflow.action_core`.
+
+The pause is declared **statically** on the tool (:func:`enact_decision_tool`),
+because that is the only form ADK can still verify when the run is resumed from a
+persisted session — see the comment in :func:`enact_decision_tool`. The dynamic
+``tool_context.request_confirmation`` call inside :func:`enact_decision` is kept as
+a fallback for the path where the tool is registered bare.
 """
 
 import logging
 from typing import Any, Dict
 
-from google.adk.tools import ToolContext
+from google.adk.tools import FunctionTool, ToolContext
 
 from workflow.action_core import (
     ALL_DECISIONS,
@@ -71,3 +77,22 @@ def enact_decision(decision: str, account_id: str, reason: str, tool_context: To
     except Exception as e:
         logger.error("[enact_decision] execution failed: %s", e)
         return {"status": "error", "decision": decision, "account_id": account_id, "message": str(e)}
+
+
+def enact_decision_tool() -> FunctionTool:
+    """``enact_decision`` wrapped so ADK gates it on analyst confirmation.
+
+    ``require_confirmation=True`` makes ADK pause before the tool body runs and —
+    the part that matters — makes ``check_require_confirmation()`` return True when
+    the analyst's answer arrives on a **resumed** run. ADK does not persist the
+    function-response event that carries a dynamically requested confirmation, so
+    the dynamic-only form cannot be verified after a round trip through the session
+    store: ADK raises ``Tool 'enact_decision' does not require confirmation`` and
+    ``/investigation/{id}/resume`` 404s, leaving the disposition unsaved and the
+    investigation stuck in ``awaiting_confirmation``.
+
+    ADK builds the pause with its own generic hint and no payload, so
+    ``workflow.runner`` reads the decision, account and reason out of the
+    confirmation call's ``originalFunctionCall.args`` instead.
+    """
+    return FunctionTool(func=enact_decision, require_confirmation=True)

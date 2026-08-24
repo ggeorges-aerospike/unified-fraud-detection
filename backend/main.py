@@ -102,16 +102,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Investigation service initialization warning: {e}")
 
-    # Verify the Gemini API key + model are reachable when using Gemini (non-fatal)
+    # Verify the configured LLM provider is reachable (non-fatal)
     try:
-        from workflow.health import log_gemini_health
+        from workflow.health import log_gemini_health, log_vllm_health
         from workflow.llm import LLMConfig
 
         llm_cfg = LLMConfig.from_env()
-        if llm_cfg.provider == "gemini" and investigation_engine != "mock":
-            await log_gemini_health(llm_cfg.model)
+        if investigation_engine != "mock":
+            if llm_cfg.provider == "gemini":
+                await log_gemini_health(llm_cfg.model)
+            elif llm_cfg.provider == "vllm":
+                await log_vllm_health(
+                    llm_cfg.vllm_base_url, llm_cfg.vllm_model, llm_cfg.vllm_api_key
+                )
     except Exception as e:
-        logger.warning(f"Gemini health check could not run: {e}")
+        logger.warning(f"LLM health check could not run: {e}")
     
     # Setup scheduler with detection callback
     scheduler_service.set_detection_callback(flagged_account_service.run_detection)

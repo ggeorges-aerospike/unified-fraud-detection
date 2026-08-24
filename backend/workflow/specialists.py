@@ -29,6 +29,23 @@ _SPECIALIST_SYSTEM = """You are a {role} on a fraud-investigation team. You are 
 {evidence}
 """
 
+# The LangGraph investigator's system prompt. Lives here (engine-neutral, no
+# imports) so the prefix-reuse benchmark can render the real prompt without
+# pulling in the graph/LLM stack.
+INVESTIGATOR_SYSTEM = """You are a SENIOR FRAUD ANALYST synthesizing parallel specialist reports.
+
+Three specialists have ALREADY investigated in parallel. Use their findings as primary evidence.
+Call tools ONLY to resolve gaps or conflicts. Reach a decision in 0-3 tool calls when possible.
+
+## SPECIALIST FINDINGS
+{findings}
+
+When confident, call submit_assessment exactly once with typology, risk_level, risk_score,
+decision, account_id (primary flagged account), and reasoning. Then STOP.
+
+Valid decisions: allow_monitor, step_up_auth, temporary_freeze, full_block, escalate_compliance.
+"""
+
 _SPECIALIST_SPECS = {
     NETWORK_ANALYST_NAME: dict(
         role="NETWORK ANALYST",

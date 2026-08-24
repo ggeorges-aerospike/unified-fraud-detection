@@ -329,6 +329,16 @@ const initialState: InvestigationState = {
   priorCases: [],
 };
 
+// A stored investigation that carries a report has completed report generation,
+// even if its completed_steps predates that fix.
+function withReportStep(steps: string[] | undefined, report: string | undefined): string[] {
+  const base = steps && steps.length
+    ? [...steps]
+    : ["alert_validation", "data_collection", "llm_agent", "report_generation"];
+  if (report && !base.includes("report_generation")) base.push("report_generation");
+  return base;
+}
+
 export function useInvestigation() {
   const [state, setState] = useState<InvestigationState>(initialState);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -987,7 +997,10 @@ export function useInvestigation() {
             { id: "llm_agent", name: "AI Agent Investigation", description: "AI analysis", phase: "analysis" },
             { id: "report_generation", name: "Report Generation", description: "Generate report", phase: "reporting" },
           ],
-          completedSteps: inv.completed_steps || ["alert_validation", "data_collection", "llm_agent", "report_generation"],
+          // A record with a report has finished report generation, whatever its
+          // completed_steps says — older paused records omitted it, which left the
+          // Report Generation step spinning on revisit.
+          completedSteps: withReportStep(inv.completed_steps, inv.report_markdown),
           initialEvidence: inv.initial_evidence,
           finalAssessment: inv.final_assessment,
           toolCalls: inv.tool_calls || [],

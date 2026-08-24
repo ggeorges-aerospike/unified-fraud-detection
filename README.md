@@ -77,7 +77,8 @@ The investigation backend exposes **three interchangeable engines** behind a com
 | Setting | Values | Default |
 |---------|--------|---------|
 | `INVESTIGATION_ENGINE` | `adk`, `langgraph`, `mock` | `adk` |
-| `LLM_PROVIDER` | `gemini`, `ollama` | `gemini` |
+| `LLM_PROVIDER` | `gemini`, `ollama`, `vllm` | `gemini` |
+| `ADK_PARALLEL_EVIDENCE` | `true`, `false` — run the three evidence specialists concurrently | `true` |
 
 - **`adk`** — Google ADK `SequentialAgent` + `Runner` (`backend/workflow/runner.py`, `agent.py`). Uses Aerospike for ADK session/memory/artifact services.
 - **`langgraph`** — LangGraph `StateGraph` with the same pipeline (parallel specialists → investigator → report → gated action) and feature parity: cross-case memory, HITL approval, disposition overrides, specialist findings, and enacted actions (`backend/workflow/graph.py`).
@@ -88,8 +89,26 @@ Set in `.env` before starting the backend:
 ```bash
 INVESTIGATION_ENGINE=adk          # adk | langgraph | mock
 LLM_PROVIDER=gemini               # or ollama (OLLAMA_BASE_URL, OLLAMA_MODEL)
+                                  # or vllm  (VLLM_BASE_URL, VLLM_MODEL)
 ADK_MODEL=gemini-3.5-flash
 ```
+
+### Self-hosted inference + Aerospike as the KV-cache tier
+
+`LLM_PROVIDER=vllm` points both engines at any OpenAI-compatible `/v1` endpoint — in
+this project, vLLM on ROCm with **LMCache in front of it and Aerospike as LMCache's
+remote KV tier**, so one Aerospike cluster serves the fraud features *and* the KV
+cache. A `vllm` compose profile, the LMCache connector config, and the `lmcache`
+namespace are all in the repo.
+
+Start with the measurement, not the integration — a KV-cache tier only pays off to the
+extent that prompt text repeats across investigations:
+
+```bash
+python backend/benchmarks/prefix_reuse.py     # no GPU, no LLM spend, no Aerospike
+```
+
+Full runbook: **[docs/lmcache-aerospike.md](./docs/lmcache-aerospike.md)**.
 
 ## Testing
 
@@ -201,6 +220,8 @@ The investigation opens with an ADK **`ParallelAgent`** stage: three specialist 
 | `velocity_analyst` | velocity, bursts, amount anomalies, new-recipient ratio | `get_account_transactions`, `get_account_risk_features` |
 
 Each writes a findings summary to session state via its `output_key`; the `investigator` then **synthesizes** all three rather than re-gathering, typically deciding in 0–3 tool calls. The UI shows the three lanes lighting up live (Investigation tab → *Parallel Evidence Collection*).
+
+Concurrency is controlled by `ADK_PARALLEL_EVIDENCE` (default `true`). Setting it to `false` degrades the stage to a `SequentialAgent` — same agents, same findings, same SSE steps, one after another. That fallback exists because on `google-adk <= 1.36` the parallel branch could be torn down mid-flight on graph-heavy accounts (`Token was created in a different Context` → `GeneratorExit` → the run dying "stuck at N tool calls"); 1.39 finalises the merged event stream with `Aclosing(...)`, which is what makes concurrency safe again.
 
 Two correctness details worth noting, since fan-out shares one session:
 - The tool-call **budget is enforced only on the investigator** — specialists are bounded by their own prompts; a shared counter would race.
@@ -314,6 +335,7 @@ The system implements real-time fraud detection using graph-based analysis:
 ## 📚 Documentation
 
 - **[Data Model](./docs/datamodel.md)** - Detailed data structure documentation
+- **[vLLM + LMCache + Aerospike](./docs/lmcache-aerospike.md)** - Self-hosted inference, Aerospike as the KV-cache tier, and the prefix-reuse measurement that decides whether it pays off
 
 ## 📄 License
 

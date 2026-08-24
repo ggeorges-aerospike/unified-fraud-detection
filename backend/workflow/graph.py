@@ -27,6 +27,7 @@ from workflow.specialists import (
     VELOCITY_ANALYST_NAME,
     _SPECIALIST_SPECS,
     _SPECIALIST_SYSTEM,
+    INVESTIGATOR_SYSTEM,
     _SPECIALIST_TOOLS,
 )
 from workflow.assessment import build_evidence_summary
@@ -269,19 +270,7 @@ def create_investigation_workflow(
             state.get("prior_cases") or []
         )
         findings = format_specialist_findings(state)
-        system = f"""You are a SENIOR FRAUD ANALYST synthesizing parallel specialist reports.
-
-Three specialists have ALREADY investigated in parallel. Use their findings as primary evidence.
-Call tools ONLY to resolve gaps or conflicts. Reach a decision in 0-3 tool calls when possible.
-
-## SPECIALIST FINDINGS
-{findings}
-
-When confident, call submit_assessment exactly once with typology, risk_level, risk_score,
-decision, account_id (primary flagged account), and reasoning. Then STOP.
-
-Valid decisions: allow_monitor, step_up_auth, temporary_freeze, full_block, escalate_compliance.
-"""
+        system = INVESTIGATOR_SYSTEM.format(findings=findings)
         metrics = get_collector(state["investigation_id"])
         engine = InvestigationTools(
             aerospike_service, graph_service, state["user_id"], metrics
