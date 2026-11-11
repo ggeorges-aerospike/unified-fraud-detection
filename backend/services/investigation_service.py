@@ -169,6 +169,8 @@ class InvestigationService:
         pending = final_state.get("pending_action")
         if pending:
             payload["pending_action"] = pending
+        if final_state.get("error"):
+            payload["error"] = str(final_state["error"])[:500]
         return payload
 
     def _persist_to_kv(
@@ -208,6 +210,7 @@ class InvestigationService:
         """Translate runner events into SSE events, handle HITL pauses, persist result."""
         final_state = None
         paused = False
+        error_message: Optional[str] = None
 
         async for event in event_agen:
             event_type = event.get("type", "unknown")
@@ -266,13 +269,30 @@ class InvestigationService:
                 }
 
             elif event_type == "error":
+                error_message = str(event.get("error", "Unknown error"))
                 yield {
                     "event": "error",
                     "data": {
-                        "error": event.get("error", "Unknown error"),
+                        "error": error_message,
                         "investigation_id": investigation_id,
                     },
                 }
+
+        if error_message is not None:
+            # The engine reports a mid-run failure (e.g. Gemini 503) as an `error`
+            # event rather than raising, so the partial state collected so far
+            # must NOT be stored as "completed": the UI restored such records as
+            # a finished investigation with an empty report. Keep what was
+            # reached, but mark the record failed so the analyst is told to re-run.
+            error_state = {**(final_state or {}), "error": error_message}
+            self._persist_to_kv(investigation_id, user_id, error_state, status="error")
+            self._checkpoint_persisted.discard(investigation_id)
+            self._pending_confirmations.pop(investigation_id, None)
+            meta = self._active_investigations.get(investigation_id)
+            if meta:
+                meta["status"] = "error"
+                meta["error"] = error_message
+            return
 
         if paused:
             if final_state:
@@ -465,7 +485,7 @@ class InvestigationService:
             if investigation_id not in self._run_tasks and not self._run_done.get(investigation_id):
                 rec = self.get_investigation_record(investigation_id)
                 status = (rec or {}).get("status")
-                if status in ("completed", "awaiting_confirmation"):
+                if status in ("completed", "awaiting_confirmation", "error"):
                     self._run_done[investigation_id] = True
                 else:
                     self._ensure_run_task(

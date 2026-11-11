@@ -124,3 +124,34 @@ async def test_get_workflow_steps_four_phases(investigation_service):
         "llm_agent",
         "report_generation",
     ]
+
+
+@pytest.mark.asyncio
+async def test_error_event_persists_as_error_not_completed(
+    fake_aerospike, fake_graph, action_services_bound,
+):
+    """A run that dies mid-flight (the engine yields an `error` event, as the ADK
+    runner does on a Gemini 503) must be stored as status=error, never as a
+    "completed" record with an empty report."""
+    svc = InvestigationService(fake_aerospike, fake_graph, engine_name="mock")
+    await svc.initialize()
+    fake_aerospike.is_connected.return_value = True
+
+    async def failing_run():
+        yield {"type": "state_update", "node": "llm_agent",
+               "data": {"current_phase": "llm_reasoning", "initial_evidence": {"accounts": []}}}
+        yield {"type": "error", "investigation_id": "inv_fail", "user_id": "U0001234",
+               "error": "503 UNAVAILABLE. model is experiencing high demand"}
+
+    events = await collect_async(svc._consume("inv_fail", "U0001234", failing_run()))
+
+    assert [e["event"] for e in events] == ["progress", "error"]
+    assert "503" in events[-1]["data"]["error"]
+    fake_aerospike.put_investigation.assert_called_once()
+    inv_id, record = fake_aerospike.put_investigation.call_args[0]
+    assert inv_id == "inv_fail"
+    assert record["status"] == "error"
+    assert "503" in record["error"]
+    assert record["report_markdown"] == ""
+    assert "report_generation" not in record["completed_steps"]
+    assert not svc.has_pending_action("inv_fail")

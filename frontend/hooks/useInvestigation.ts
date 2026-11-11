@@ -972,8 +972,15 @@ export function useInvestigation() {
       const inv = data.investigation;
       console.log(`[Investigation] Found existing investigation: ${inv.investigation_id}`);
 
-      const restoredStatus =
-        inv.status === "awaiting_confirmation" ? "awaiting_confirmation" : "completed";
+      // A record persisted with status "error" is a run that died mid-flight
+      // (e.g. an LLM 503). Restore it as failed so the analyst sees why and can
+      // re-run, instead of a "completed" investigation with no report.
+      const restoredStatus: InvestigationState["status"] =
+        inv.status === "awaiting_confirmation"
+          ? "awaiting_confirmation"
+          : inv.status === "error"
+            ? "error"
+            : "completed";
 
       let loaded = false;
       setState((prev) => {
@@ -990,7 +997,16 @@ export function useInvestigation() {
           user_id: inv.user_id,
           status: restoredStatus,
           currentNode: restoredStatus === "completed" ? "report_generation" : "llm_agent",
-          currentPhase: restoredStatus === "completed" ? "complete" : "awaiting_decision",
+          currentPhase:
+            restoredStatus === "completed"
+              ? "complete"
+              : restoredStatus === "error"
+                ? "error"
+                : "awaiting_decision",
+          error:
+            restoredStatus === "error"
+              ? inv.error || "The investigation failed on the server. Please run it again."
+              : undefined,
           steps: [
             { id: "alert_validation", name: "Alert Validation", description: "Validate initial alert", phase: "validation" },
             { id: "data_collection", name: "Data Collection", description: "Collect evidence", phase: "collection" },

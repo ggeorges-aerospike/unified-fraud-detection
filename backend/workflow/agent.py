@@ -35,6 +35,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.genai import types
 
 from workflow.assessment import build_evidence_summary
+from workflow.llm import model_name
 from workflow.nodes.report_generation import (
     build_report_instruction,
     finalize_report,
@@ -346,6 +347,6 @@ def build_investigation_agent(model: str = None) -> SequentialAgent:
     )
     logger.info(
         "Built ADK investigation agent (model=%s, evidence=%s, post-report action)",
-        model, "parallel" if PARALLEL_EVIDENCE else "sequential",
+        model_name(model), "parallel" if PARALLEL_EVIDENCE else "sequential",
     )
     return agent

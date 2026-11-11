@@ -84,6 +84,83 @@ class TestLLMConfig(unittest.TestCase):
         cfg = LLMConfig(provider="ollama", ollama_model="mistral")
         self.assertEqual(resolve_adk_model(cfg), "ollama/mistral")
 
+    def test_gemini_adk_model_retries_transient_errors(self):
+        from workflow.llm import RETRYABLE_HTTP_STATUS_CODES, LLMConfig, model_name, resolve_adk_model
+
+        cfg = LLMConfig(provider="gemini", model="gemini-3.5-flash", retry_attempts=4)
+        try:
+            model = resolve_adk_model(cfg)
+        except ImportError:
+            self.skipTest("google-adk not installed")
+        # A Gemini instance (not a bare string) so the genai client retries 429/5xx;
+        # the bare string yields a client that never retries, and one 503 then
+        # kills the whole investigation.
+        self.assertEqual(model.model, "gemini-3.5-flash")
+        self.assertEqual(model_name(model), "gemini-3.5-flash")
+        self.assertEqual(model.retry_options.attempts, 4)
+        self.assertIn(503, model.retry_options.http_status_codes)
+        self.assertEqual(tuple(model.retry_options.http_status_codes), RETRYABLE_HTTP_STATUS_CODES)
+
+    def test_gemini_fallback_chain_reissues_on_503(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from workflow.llm import LLMConfig, resolve_adk_model
+
+        cfg = LLMConfig(provider="gemini", model="gemini-3.5-flash",
+                        fallback_models=["gemini-3.5-flash-lite", "gemini-3.5-flash"])
+        try:
+            from google.genai import errors
+            from google.adk.models.llm_request import LlmRequest
+            model = resolve_adk_model(cfg)
+        except ImportError:
+            self.skipTest("google-adk not installed")
+        # The primary is never its own fallback.
+        self.assertEqual(model.fallback_models, ["gemini-3.5-flash-lite"])
+
+        calls = []
+
+        # Both the primary (via super()) and the fallback instance hit the base
+        # Gemini.generate_content_async, so one class patch covers both legs.
+        async def fake_generate(self_, llm_request, stream=False):
+            calls.append((type(self_).__name__, llm_request.model))
+            if llm_request.model == "gemini-3.5-flash":
+                raise errors.ServerError(503, {"error": {"message": "high demand"}}, None)
+            yield "answer"
+
+        Base = type(model).__mro__[1]  # google.adk Gemini
+        with patch.object(Base, "generate_content_async", fake_generate):
+            async def run():
+                return [r async for r in model.generate_content_async(LlmRequest(model="gemini-3.5-flash"))]
+            out = asyncio.run(run())
+        self.assertEqual(out, ["answer"])
+        self.assertEqual(calls, [("FallbackGemini", "gemini-3.5-flash"), ("Gemini", "gemini-3.5-flash-lite")])
+
+    def test_gemini_fallback_does_not_mask_non_retryable_errors(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from workflow.llm import LLMConfig, resolve_adk_model
+
+        cfg = LLMConfig(provider="gemini", model="gemini-3.5-flash", fallback_models=["gemini-3.5-flash-lite"])
+        try:
+            from google.genai import errors
+            from google.adk.models.llm_request import LlmRequest
+            model = resolve_adk_model(cfg)
+        except ImportError:
+            self.skipTest("google-adk not installed")
+
+        async def primary(self_, llm_request, stream=False):
+            raise errors.ClientError(400, {"error": {"message": "bad request"}}, None)
+            yield  # pragma: no cover
+
+        Base = type(model).__mro__[1]
+        with patch.object(Base, "generate_content_async", primary):
+            async def run():
+                return [r async for r in model.generate_content_async(LlmRequest(model="gemini-3.5-flash"))]
+            with self.assertRaises(errors.ClientError):
+                asyncio.run(run())
+
     def test_vllm_from_env(self):
         import os
         from unittest.mock import patch

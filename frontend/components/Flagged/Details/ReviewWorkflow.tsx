@@ -17,7 +17,8 @@ import {
     Wrench,
     ChevronDown,
     ChevronUp,
-    StopCircle
+    StopCircle,
+    AlertCircle
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkflowStep as InvestigationStep, TraceEvent, ToolCall } from '@/hooks/useInvestigation'
@@ -37,6 +38,8 @@ interface Props {
     onStepChange: (step: number) => void
     // AI Investigation props
     investigationStatus?: 'idle' | 'connecting' | 'running' | 'awaiting_confirmation' | 'completed' | 'error'
+    /** Why the last run failed (shown when investigationStatus === 'error') */
+    investigationError?: string
     investigationSteps?: InvestigationStep[]
     completedInvestigationSteps?: string[]
     currentNode?: string
@@ -102,6 +105,7 @@ const ReviewWorkflow = ({
     currentStep, 
     onStepChange,
     investigationStatus = 'idle',
+    investigationError,
     investigationSteps = [],
     completedInvestigationSteps = [],
     currentNode = '',
@@ -369,13 +373,22 @@ const ReviewWorkflow = ({
 
                     {/* Investigation control — the single action for this panel */}
                     <div className="mt-6 pt-4 border-t border-slate-200">
+                        {investigationStatus === 'error' && (
+                            <div className="mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                                <div>
+                                    <p className="font-medium">The AI investigation did not finish</p>
+                                    <p className="text-red-600">{investigationError || 'The investigation failed on the server. Please run it again.'}</p>
+                                </div>
+                            </div>
+                        )}
                         {(investigationStatus === 'idle' || investigationStatus === 'completed' || investigationStatus === 'error') && onStart && (
                             <Button
                                 onClick={onStart}
                                 className="w-full bg-indigo-600 hover:bg-indigo-700 text-white"
                             >
                                 <Brain className="h-4 w-4 mr-2" />
-                                {investigationStatus === 'completed' ? 'Re-run AI Investigation' : 'Start AI Investigation'}
+                                {investigationStatus === 'completed' || investigationStatus === 'error' ? 'Re-run AI Investigation' : 'Start AI Investigation'}
                             </Button>
                         )}
                         {(investigationStatus === 'running' || investigationStatus === 'connecting') && onStop && (

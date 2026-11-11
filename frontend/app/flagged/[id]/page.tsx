@@ -755,6 +755,7 @@ export default function FlaggedAccountDetailsPage() {
                         currentStep={currentStep}
                         onStepChange={setCurrentStep}
                         investigationStatus={investigation.status}
+                        investigationError={investigation.error}
                         aiDecision={investigation.enactedActions[0]?.action || investigation.finalAssessment?.decision || ''}
                         investigationSteps={investigation.steps}
                         completedInvestigationSteps={investigation.completedSteps}

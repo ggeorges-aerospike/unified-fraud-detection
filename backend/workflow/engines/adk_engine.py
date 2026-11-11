@@ -6,7 +6,7 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from workflow.engines.base import BaseInvestigationEngine
-from workflow.llm import LLMConfig, resolve_adk_model
+from workflow.llm import LLMConfig, model_name, resolve_adk_model
 from workflow.runner import (
     build_runner,
     get_workflow_steps,
@@ -43,7 +43,7 @@ class AdkEngine(BaseInvestigationEngine):
             self.graph_service,
             self.model,
         )
-        logger.info("AdkEngine initialized (model=%s)", self.model)
+        logger.info("AdkEngine initialized (model=%s)", model_name(self.model))
 
     async def close(self) -> None:
         if self._runner:
