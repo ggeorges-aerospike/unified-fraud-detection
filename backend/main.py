@@ -138,7 +138,7 @@ async def lifespan(app: FastAPI):
         from workflow.llm import LLMConfig
 
         llm_cfg = LLMConfig.from_env()
-        if investigation_engine != "mock":
+        if investigation_engine not in ("mock", "strands"):  # strands calls Bedrock, not Gemini
             if llm_cfg.provider == "gemini":
                 await log_gemini_health(llm_cfg.model)
             elif llm_cfg.provider == "vllm":
