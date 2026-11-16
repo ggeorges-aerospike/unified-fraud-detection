@@ -17,6 +17,9 @@ google-adk>=1.39,<1.40
 adk-aerospike>=0.1.0,<0.2
 langgraph>=0.2.0
 langgraph-checkpoint-aerospike>=0.1.0
+# AWS Strands Agents engine (INVESTIGATION_ENGINE=strands) + its Aerospike session/memory/storage
+strands-agents==1.64.0
+strands-aerospike==0.0.1
 langchain-core>=0.3.0
 langchain-google-genai>=2.0.0
 langchain-ollama>=0.2.0

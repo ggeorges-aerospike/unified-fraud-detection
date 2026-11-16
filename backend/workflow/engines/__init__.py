@@ -6,6 +6,7 @@ Select backend via ``INVESTIGATION_ENGINE`` environment variable:
 - ``adk`` (default) — Google ADK SequentialAgent
 - ``langgraph`` — LangGraph StateGraph with feature parity
 - ``mock`` — deterministic engine with no LLM calls (tests and demos)
+- ``strands`` — AWS Strands Agents on Amazon Bedrock; agent state in Aerospike (strands-aerospike)
 """
 
 import os
@@ -14,7 +15,7 @@ from typing import Any, Optional, Tuple
 from workflow.engines.base import BaseInvestigationEngine
 from workflow.llm import LLMConfig
 
-SUPPORTED_ENGINES: Tuple[str, ...] = ("adk", "langgraph", "mock")
+SUPPORTED_ENGINES: Tuple[str, ...] = ("adk", "langgraph", "mock", "strands")
 
 
 def get_engine(
@@ -39,6 +40,10 @@ def get_engine(
         from workflow.engines.mock_engine import MockEngine
 
         return MockEngine(aerospike_service, graph_service, llm_config)
+    if engine_name == "strands":
+        from workflow.engines.strands_engine import StrandsEngine
+
+        return StrandsEngine(aerospike_service, graph_service, llm_config)
 
     raise ValueError(
         f"Unknown INVESTIGATION_ENGINE '{engine_name}'. Supported: {', '.join(SUPPORTED_ENGINES)}"
@@ -59,6 +64,10 @@ def __getattr__(name: str):
         from workflow.engines.mock_engine import MockEngine
 
         return MockEngine
+    if name == "StrandsEngine":
+        from workflow.engines.strands_engine import StrandsEngine
+
+        return StrandsEngine
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -67,6 +76,7 @@ __all__ = [
     "AdkEngine",
     "LangGraphEngine",
     "MockEngine",
+    "StrandsEngine",
     "get_engine",
     "SUPPORTED_ENGINES",
 ]

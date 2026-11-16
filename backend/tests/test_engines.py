@@ -12,7 +12,7 @@ class TestEngineFactory(unittest.TestCase):
     def test_supported_engines(self):
         from workflow.engines import SUPPORTED_ENGINES
 
-        self.assertEqual(SUPPORTED_ENGINES, ("adk", "langgraph", "mock"))
+        self.assertEqual(SUPPORTED_ENGINES, ("adk", "langgraph", "mock", "strands"))
 
     def test_unknown_engine_raises(self):
         from workflow.engines import get_engine

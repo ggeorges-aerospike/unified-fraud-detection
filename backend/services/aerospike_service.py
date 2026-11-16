@@ -2398,6 +2398,11 @@ class AerospikeService:
             "adk_app_state": self.truncate_set("adk_app_state"),
             "adk_user_state": self.truncate_set("adk_user_state"),
             "adk_artifacts": self.truncate_set("adk_artifacts"),
+            # AWS Strands engine sets (INVESTIGATION_ENGINE=strands, via strands-aerospike)
+            "strands_sessions": self.truncate_set("strands_sessions"),
+            "strands_memory": self.truncate_set("strands_memory"),
+            "strands_storage": self.truncate_set("strands_storage"),
+            "strands_storage_chunks": self.truncate_set("strands_storage_chunks"),
         }
     
     # ----------------------------------------------------------------------------------------------------------

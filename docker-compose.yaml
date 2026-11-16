@@ -125,7 +125,18 @@ services:
       # Google ADK / Gemini settings
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-FALSE}
-      - INVESTIGATION_ENGINE=${INVESTIGATION_ENGINE:-adk}
+      # adk | langgraph | mock | strands (re:invent branch default: AWS Strands on Bedrock)
+      - INVESTIGATION_ENGINE=${INVESTIGATION_ENGINE:-strands}
+      # AWS Strands engine: Bedrock region, per-role models and effort. Credentials come from the
+      # host's ~/.aws (mounted read-only below), so refreshed SSO credentials need no rebuild.
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - STRANDS_SPECIALIST_MODEL=${STRANDS_SPECIALIST_MODEL:-us.anthropic.claude-sonnet-5-5}
+      - STRANDS_SPECIALIST_EFFORT=${STRANDS_SPECIALIST_EFFORT:-medium}
+      - STRANDS_INVESTIGATOR_MODEL=${STRANDS_INVESTIGATOR_MODEL:-us.anthropic.claude-opus-5-5}
+      - STRANDS_INVESTIGATOR_EFFORT=${STRANDS_INVESTIGATOR_EFFORT:-high}
+      - STRANDS_REPORT_MODEL=${STRANDS_REPORT_MODEL:-us.anthropic.claude-opus-5-5}
+      - STRANDS_REPORT_EFFORT=${STRANDS_REPORT_EFFORT:-medium}
       - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       - ADK_MODEL=${ADK_MODEL:-gemini-3.1-flash-lite}
       # Backup models tried when ADK_MODEL keeps returning 429/5xx after retries
@@ -154,6 +165,7 @@ services:
       - PROMPT_LAYOUT=${PROMPT_LAYOUT:-current}
     volumes:
       - ./data:/data
+      - ${HOME}/.aws:/root/.aws:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://0.0.0.0:4000/health"]
       interval: 5s
