@@ -40,7 +40,14 @@ interface Funnel {
         urgent: number
         last_run: TriageRun | null
     }
-    agents: { investigated: number; awaiting: number; engine?: string; label?: string; model?: string | null }
+    agents: {
+        investigated: number
+        awaiting: number
+        engine?: string
+        label?: string
+        model?: string | null
+        roles?: { model: string; agents: string }[]
+    }
     human: { decided: number }
 }
 
@@ -214,8 +221,19 @@ export default function TriageFunnel({ onChanged }: { onChanged?: () => void }) 
                         value={fmt(data.agents.investigated)}
                         caption={`investigated · ${fmt(data.agents.awaiting)} awaiting`}
                         detail={
-                            data.agents.model && (
-                                <span className="rounded bg-muted px-1.5 text-[10px] tracking-wide text-muted-foreground">{data.agents.model}</span>
+                            data.agents.roles && data.agents.roles.length > 0 ? (
+                                <ul className="space-y-1">
+                                    {data.agents.roles.map((r) => (
+                                        <li key={r.model} className="flex items-baseline gap-1.5">
+                                            <span className="shrink-0 rounded bg-muted px-1.5 text-[10px] font-medium tracking-wide text-foreground">{r.model}</span>
+                                            <span className="text-muted-foreground">{r.agents}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            ) : (
+                                data.agents.model && (
+                                    <span className="rounded bg-muted px-1.5 text-[10px] tracking-wide text-muted-foreground">{data.agents.model}</span>
+                                )
                             )
                         }
                     />

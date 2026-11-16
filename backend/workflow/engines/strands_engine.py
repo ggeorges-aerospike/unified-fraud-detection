@@ -339,9 +339,20 @@ class StrandsEngine(BaseInvestigationEngine):
         return "strands"
 
     def describe(self) -> Dict[str, Any]:
-        roles = [self.config.specialist.model_id, self.config.investigator.model_id, self.config.report.model_id]
-        names = list(dict.fromkeys(short_model_name(m) for m in roles))
-        return {"engine": "strands", "label": "AWS Strands", "model": " · ".join(names)}
+        """Framework label, the models in use, and which agents run on which model."""
+        by_model: Dict[str, List[str]] = {}
+        for agents, role in (
+            ("network, device & velocity specialists", self.config.specialist),
+            ("investigator", self.config.investigator),
+            ("report writer", self.config.report),
+        ):
+            by_model.setdefault(short_model_name(role.model_id), []).append(agents)
+        return {
+            "engine": "strands",
+            "label": "AWS Strands",
+            "model": " · ".join(by_model),
+            "roles": [{"model": m, "agents": ", ".join(a)} for m, a in by_model.items()],
+        }
 
     def get_workflow_steps(self) -> List[Dict[str, str]]:
         return [

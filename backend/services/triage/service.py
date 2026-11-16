@@ -272,7 +272,7 @@ class TriageService:
                 "last_run": self.last_run,
             },
             "agents": {
-                **{k: v for k, v in (self._agents_info() or {}).items() if k in ("engine", "label", "model")},
+                **{k: v for k, v in (self._agents_info() or {}).items() if k in ("engine", "label", "model", "roles")},
                 "investigated": len(reached_agent),
                 "awaiting": sum(1 for a in accounts if a.get("status") == "pending_review"
                                 and a.get("user_id") not in investigated),

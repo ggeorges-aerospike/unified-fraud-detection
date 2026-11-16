@@ -245,7 +245,11 @@ async def test_memory_recall_filters_self_and_matches_entities(engine):
 def test_identity_and_registry(fake_aerospike, fake_graph):
     eng = StrandsEngine(fake_aerospike, fake_graph, config=CONFIG)
     assert eng.engine_name == "strands"
-    assert eng.describe() == {"engine": "strands", "label": "AWS Strands", "model": "Sonnet 5.5 · Opus 5.5"}
+    assert eng.describe() == {
+        "engine": "strands", "label": "AWS Strands", "model": "Sonnet 5.5 · Opus 5.5",
+        "roles": [{"model": "Sonnet 5.5", "agents": "network, device & velocity specialists"},
+                  {"model": "Opus 5.5", "agents": "investigator, report writer"}],
+    }
     assert short_model_name("us.anthropic.claude-haiku-5-5") == "Haiku 5.5"
     assert short_model_name("anthropic.claude-opus-5") == "Opus 5"
     from workflow.engines import SUPPORTED_ENGINES, get_engine
