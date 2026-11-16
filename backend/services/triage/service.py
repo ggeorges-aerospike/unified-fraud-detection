@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -51,12 +52,16 @@ class TriageService:
         concurrency: int = 16,
         last_detection: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         risk_threshold: Optional[Callable[[], float]] = None,
+        predictive_model: Optional[Callable[[], Optional[str]]] = None,
+        agents_info: Optional[Callable[[], Dict[str, Any]]] = None,
     ):
         self._as = aerospike
         self.model = model
         self.concurrency = max(1, concurrency)
         self._last_detection = last_detection or (lambda: None)
         self._risk_threshold = risk_threshold or (lambda: 50.0)
+        self._predictive_model = predictive_model or (lambda: None)
+        self._agents_info = agents_info or (lambda: {})
         self.last_run: Optional[Dict[str, Any]] = None
 
     @property
@@ -249,11 +254,15 @@ class TriageService:
                 "flagged": len(accounts),
                 "threshold": self._risk_threshold(),
                 "last_run": job.get("end_time"),
+                "model": self._predictive_model(),
             },
             "decision_model": {
                 "enabled": self.enabled,
                 "mode": getattr(self.model, "mode", "off"),
-                "model": getattr(self.model, "name", None),
+                # The model that actually answered the stored decisions; the configured name
+                # is only a placeholder until a self-hosted server has replied once.
+                "model": (Counter((a.get("triage") or {}).get("model") for a in triaged).most_common(1) or [[None]])[0][0]
+                or getattr(self.model, "name", None),
                 "provider": getattr(self.model, "label", None),
                 "triaged": len(triaged),
                 "untriaged_pending": sum(1 for a in accounts if a.get("status") == "pending_review" and not a.get("triage")),
@@ -263,6 +272,7 @@ class TriageService:
                 "last_run": self.last_run,
             },
             "agents": {
+                **{k: v for k, v in (self._agents_info() or {}).items() if k in ("engine", "label", "model")},
                 "investigated": len(reached_agent),
                 "awaiting": sum(1 for a in accounts if a.get("status") == "pending_review"
                                 and a.get("user_id") not in investigated),

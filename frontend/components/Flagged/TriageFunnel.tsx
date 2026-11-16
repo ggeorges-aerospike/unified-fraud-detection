@@ -27,7 +27,7 @@ export interface TriageRun {
 }
 
 interface Funnel {
-    predictive: { evaluated: number | null; flagged: number; threshold: number; last_run: string | null }
+    predictive: { evaluated: number | null; flagged: number; threshold: number; last_run: string | null; model?: string | null }
     decision_model: {
         enabled: boolean
         mode: string
@@ -40,7 +40,7 @@ interface Funnel {
         urgent: number
         last_run: TriageRun | null
     }
-    agents: { investigated: number; awaiting: number }
+    agents: { investigated: number; awaiting: number; engine?: string; label?: string; model?: string | null }
     human: { decided: number }
 }
 
@@ -60,12 +60,12 @@ function Tier({
 }) {
     return (
         <div className="flex-1 min-w-0 rounded-lg border bg-card p-4">
-            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-semibold text-white ${accent}`}>
+            <div className="flex items-start gap-2 text-xs font-medium text-muted-foreground">
+                <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white ${accent}`}>
                     {step}
                 </span>
-                <Icon className="h-3.5 w-3.5" />
-                <span className="truncate">{title}</span>
+                <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 leading-snug">{title}</span>
             </div>
             <div className="mt-2 text-3xl font-bold tabular-nums">{value}</div>
             <p className="text-xs text-muted-foreground">{caption}</p>
@@ -178,7 +178,7 @@ export default function TriageFunnel({ onChanged }: { onChanged?: () => void }) 
                 <div className="flex flex-col items-stretch gap-2 md:flex-row">
                     <Tier
                         step={1}
-                        title="Predictive model"
+                        title={p.model ? `Predictive model · ${p.model}` : 'Predictive model'}
                         icon={Gauge}
                         accent="bg-slate-500"
                         value={fmt(p.flagged)}
@@ -208,11 +208,16 @@ export default function TriageFunnel({ onChanged }: { onChanged?: () => void }) 
                     <ChevronRight className="hidden h-5 w-5 shrink-0 self-center text-muted-foreground md:block" />
                     <Tier
                         step={3}
-                        title="AI agents"
+                        title={data.agents.label ? `AI agents · ${data.agents.label}` : 'AI agents'}
                         icon={Bot}
                         accent="bg-indigo-600"
                         value={fmt(data.agents.investigated)}
                         caption={`investigated · ${fmt(data.agents.awaiting)} awaiting`}
+                        detail={
+                            data.agents.model && (
+                                <span className="rounded bg-muted px-1.5 text-[10px] tracking-wide text-muted-foreground">{data.agents.model}</span>
+                            )
+                        }
                     />
                     <ChevronRight className="hidden h-5 w-5 shrink-0 self-center text-muted-foreground md:block" />
                     <Tier

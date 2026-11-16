@@ -37,6 +37,9 @@ class AdkEngine(BaseInvestigationEngine):
     def engine_name(self) -> str:
         return "adk"
 
+    def describe(self) -> Dict[str, Any]:
+        return {"engine": "adk", "label": "Google ADK", "model": model_name(self.model)}
+
     async def initialize(self) -> None:
         self._runner = build_runner(
             self.aerospike_service,

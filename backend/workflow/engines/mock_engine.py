@@ -204,6 +204,9 @@ class MockEngine(BaseInvestigationEngine):
     def engine_name(self) -> str:
         return "mock"
 
+    def describe(self) -> Dict[str, Any]:
+        return {"engine": "mock", "label": "Mock agents", "model": "no LLM"}
+
     async def initialize(self) -> None:
         if self.aerospike_service and getattr(self.aerospike_service, "is_connected", lambda: False)():
             self._memory_service = get_memory_service(self.aerospike_service)

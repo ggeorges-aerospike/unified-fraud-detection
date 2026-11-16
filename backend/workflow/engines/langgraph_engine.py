@@ -18,7 +18,7 @@ from workflow.graph import (
     get_workflow_steps,
     persist_case_memory,
 )
-from workflow.llm import LLMConfig
+from workflow.llm import LLMConfig, describe as describe_llm
 from workflow.memory_service import close_memory_service
 from workflow.metrics import get_collector, remove_collector
 from workflow.nodes.report_generation import generate_fallback_report
@@ -68,6 +68,9 @@ class LangGraphEngine(BaseInvestigationEngine):
     @property
     def engine_name(self) -> str:
         return "langgraph"
+
+    def describe(self) -> Dict[str, Any]:
+        return {"engine": "langgraph", "label": "LangGraph", "model": describe_llm(self.llm_config).split(" @ ")[0]}
 
     async def initialize(self) -> None:
         self._workflow = create_investigation_workflow(

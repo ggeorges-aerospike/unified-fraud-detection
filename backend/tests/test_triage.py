@@ -469,7 +469,9 @@ class TestTriageService:
         fake = FakeAerospike()
         _seed(fake, "U1")
         svc = TriageService(fake, MockDecisionModel(), concurrency=4,
-                            last_detection=lambda: {"users_evaluated": 100, "end_time": "t"})
+                            last_detection=lambda: {"users_evaluated": 100, "end_time": "t"},
+                            predictive_model=lambda: "rules-v2.0",
+                            agents_info=lambda: {"engine": "adk", "label": "Google ADK", "model": "gemini-3.5-flash"})
         svc._investigated_users = lambda: set()
         assert svc.pending_user_ids() == ["U1"]
         run = svc.triage_many(["U1", "U1", "missing"])
@@ -477,7 +479,9 @@ class TestTriageService:
         assert run["outcomes"][AUTO_CLEAR] == 1
         assert svc.pending_user_ids() == []
         f = svc.funnel()
-        assert f["predictive"] == {"evaluated": 100, "flagged": 1, "threshold": 50.0, "last_run": "t"}
+        assert f["predictive"] == {"evaluated": 100, "flagged": 1, "threshold": 50.0, "last_run": "t",
+                                   "model": "rules-v2.0"}
+        assert (f["agents"]["label"], f["agents"]["model"]) == ("Google ADK", "gemini-3.5-flash")
         assert f["decision_model"]["auto_cleared"] == 1
         assert f["agents"]["awaiting"] == 0
 

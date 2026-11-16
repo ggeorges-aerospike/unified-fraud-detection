@@ -67,3 +67,7 @@ class BaseInvestigationEngine(ABC):
     @abstractmethod
     def engine_name(self) -> str:
         """Engine identifier (``adk`` or ``langgraph``)."""
+
+    def describe(self) -> Dict[str, Any]:
+        """What the UI shows for this engine: a framework label and the model(s) it runs."""
+        return {"engine": self.engine_name, "label": self.engine_name, "model": None}

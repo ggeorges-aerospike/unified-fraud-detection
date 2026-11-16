@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
         # Tier 2: decision-model triage between predictive scoring and the agents
         # (Strands Decider, Kev or TypeSafe Jev — any /v1/systemone server; see DECISION_MODEL)
         from services.triage import TriageService, model_from_env
+        from services.ml_service import ml_model_service
         try:
             decision_model = model_from_env()
         except ValueError as e:
@@ -93,6 +94,12 @@ async def lifespan(app: FastAPI):
             concurrency=int(os.environ.get("DECISION_MODEL_CONCURRENCY") or os.environ.get("JEV_CONCURRENCY") or "16"),
             last_detection=flagged_account_service.last_detection_job,
             risk_threshold=lambda: flagged_account_service.get_config().get("risk_threshold", 50),
+            predictive_model=lambda: ml_model_service.model_version,
+            agents_info=lambda: (
+                investigation_service.engine.describe()
+                if investigation_service is not None and investigation_service.engine is not None
+                else {}
+            ),
         )
         flagged_account_service.set_triage_service(triage_service)
         logger.info(
