@@ -60,7 +60,7 @@ rm -f /tmp/features.conf
 aerolab cluster partition create -n demo-amd -t nvme -p 17,17,17,17,17
 aerolab cluster partition conf -n demo-amd --namespace=test --filter-type=nvme --configure=device
 aerolab conf adjust -n demo-amd set "namespace test.replication-factor" 2
-aerolab cluster start -n demo-amd
+aerolab aerospike start -n demo-amd
 aerolab cluster list
 ```
 

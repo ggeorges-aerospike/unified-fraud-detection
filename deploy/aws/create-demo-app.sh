@@ -16,6 +16,9 @@
 #   ./create-demo-app.sh            # create (or redeploy onto) the app instance
 #   ./create-demo-app.sh redeploy   # ship the current commit to the existing instance and rebuild
 #   ./create-demo-app.sh destroy
+#
+# DATA_SOURCE_MODE=local (default) runs the Graph Service on the app host so the app can seed and
+# bulk-load its own dataset; DATA_SOURCE_MODE=remote uses the fleet's graph-1 and a bulk-loaded graph.
 source "$(dirname "$0")/lib.sh"
 
 NAME="${DEPLOY_PREFIX}-app"
@@ -24,9 +27,15 @@ deploy() {
   local id="$1"
   local seed graph_id graph_ip tarball
   discover_aerospike; seed="${AS_SEED_IP}"
-  graph_id="$(instance_by_name graph "${DEPLOY_PREFIX}-graph-1")"
-  [[ -n "${graph_id}" ]] || die "no graph instance (${DEPLOY_PREFIX}-graph-1) — run ./load_runner.sh create 1 first"
-  graph_ip="$(instance_ip "${graph_id}")"
+  # local:  the app seeds its own dataset; Graph Service runs beside it (sharing its data dir).
+  # remote: query the bulk-loaded graph on the fleet's graph instance 1 (billion-scale mode).
+  if [[ "${DATA_SOURCE_MODE}" == remote ]]; then
+    graph_id="$(instance_by_name graph "${DEPLOY_PREFIX}-graph-1")"
+    [[ -n "${graph_id}" ]] || die "no graph instance (${DEPLOY_PREFIX}-graph-1) — run ./load_runner.sh create 1 first"
+    graph_ip="$(instance_ip "${graph_id}")"
+  else
+    graph_ip=sidecar
+  fi
 
   [[ -z "$(git -C "${REPO_ROOT}" status --porcelain)" ]] \
     || log "warning: uncommitted changes are NOT deployed — only HEAD ($(git -C "${REPO_ROOT}" rev-parse --short HEAD)) is shipped"
@@ -36,7 +45,7 @@ deploy() {
   rm -f "${tgz}"
 
   log "deploying $(git -C "${REPO_ROOT}" rev-parse --short HEAD) to ${id} (aerospike seed ${seed}, graph ${graph_ip})"
-  local envs="export AWS_REGION='${AWS_REGION}' APP_TARBALL='${tarball}' AEROSPIKE_HOST='${seed}' GRAPH_HOST_ADDRESS='${graph_ip}' SECRET_DEMO_AUTH='${SECRET_DEMO_AUTH}'"
+  local envs="export AWS_REGION='${AWS_REGION}' APP_TARBALL='${tarball}' AEROSPIKE_HOST='${seed}' GRAPH_HOST_ADDRESS='${graph_ip}' SECRET_DEMO_AUTH='${SECRET_DEMO_AUTH}' DATA_SOURCE_MODE='${DATA_SOURCE_MODE}' AGS_IMAGE='${AGS_IMAGE}' AS_NAMESPACE='${AS_NAMESPACE}'"
   ssm_run_file 1800 "${AWS_DIR}/bootstrap-demo-app.sh" "${envs}" "${id}"
   instructions "${id}"
 }
