@@ -278,3 +278,13 @@ async def test_session_created_once_before_parallel_specialists(engine):
     await collect(engine.run_investigation("U1", "inv:8"))
     assert created == ["inv_8"]                                   # once, with a colon-free id
     assert all(n_created == 1 for _, n_created in order)          # before any agent ran
+
+
+async def test_report_reaches_the_ui_before_the_pause(engine):
+    """The UI closes its stream on action_confirmation_required; the report must arrive first."""
+    engine._run_agent = scripted_runner(decision="full_block")
+    events = await collect(engine.run_investigation("U1", "inv-9"))
+    pause_at = next(i for i, e in enumerate(events) if e["type"] == "action_confirmation_required")
+    before = [e for e in events[:pause_at] if e["type"] == "state_update"]
+    assert before and before[-1]["data"]["report_markdown"].startswith("# Report")
+    assert before[-1]["data"]["final_assessment"]["decision"] == "full_block"

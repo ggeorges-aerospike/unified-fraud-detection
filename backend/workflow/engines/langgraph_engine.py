@@ -117,8 +117,8 @@ class LangGraphEngine(BaseInvestigationEngine):
                                 "fc_id": "langgraph_interrupt",
                                 "current_step": current_step,
                             }
-                            yield _trace("llm_agent", "action_confirmation_required", paused_payload)
-                            yield {"type": "action_confirmation_required", "data": paused_payload}
+                            # State (with the report) BEFORE the pause event: the UI closes
+                            # its stream on action_confirmation_required.
                             yield {
                                 "type": "state_update",
                                 "data": {
@@ -131,6 +131,8 @@ class LangGraphEngine(BaseInvestigationEngine):
                                     "current_phase": "awaiting_decision",
                                 },
                             }
+                            yield _trace("llm_agent", "action_confirmation_required", paused_payload)
+                            yield {"type": "action_confirmation_required", "data": paused_payload}
                             yield {"type": "_paused", "data": paused_payload}
                     continue
 

@@ -561,6 +561,9 @@ class StrandsEngine(BaseInvestigationEngine):
                 logger.warning("[%s] report agent failed, using template: %s", investigation_id, exc)
                 yield _trace("report_generation", "error", {"error": f"Report model failed; template used: {exc}"[:300]})
             state["report_markdown"] = report or generate_fallback_report(state)
+            # Send the report as soon as it exists: the UI closes its stream when a pause
+            # arrives, so anything sent after the pause event never reaches it.
+            yield {"type": "state_update", "data": {**self._ui_state(state), "current_phase": "report"}}
             yield _trace("report_generation", "node_complete", {"status": "success"})
             metrics.end_node("report_generation")
 
@@ -592,9 +595,10 @@ class StrandsEngine(BaseInvestigationEngine):
                              f"Reason: {reason}. Approve this action?"),
                 }
                 await self._save_pause(investigation_id, state)
+                # State (with the report) BEFORE the pause event: the UI stops reading at the pause.
+                yield {"type": "state_update", "data": {**self._ui_state(state), "current_phase": "awaiting_decision"}}
                 yield _trace("llm_agent", "action_confirmation_required", payload)
                 yield {"type": "action_confirmation_required", "data": payload}
-                yield {"type": "state_update", "data": {**self._ui_state(state), "current_phase": "awaiting_decision"}}
                 yield {"type": "_paused", "data": payload}
                 return
             if decision in ALL_DECISIONS:
