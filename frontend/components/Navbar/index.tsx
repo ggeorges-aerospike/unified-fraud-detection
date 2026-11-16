@@ -20,14 +20,13 @@ const navigation: {
   { name: 'Users', href: '/users' },
   { name: 'Transactions', href: '/transactions' },
   { name: 'Flagged Accounts', href: '/flagged' },
+  { name: 'HMA', href: '/hma' },
   // { name: 'Fraud Patterns', href: '/fraud-patterns' },
   // { name: 'Graph View', href: '/graph' },
   // Admin is disabled in remote load-gen mode, where the ingest/clear operations
   // it exposes are performed externally and the backend rejects them with 409.
   // In local mode every capability is available, so the menu stays live.
   { name: 'Admin', href: '/admin', remoteOnlyDisabled: true },
-  { name: 'API Docs', href: '/docs' },
-  { name: 'Zipkin', href: '/tracing', disabled: true },
 ]
 
 export default function Navbar() {

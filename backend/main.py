@@ -1499,6 +1499,20 @@ async def bulk_load_upload(
 
 
 
+@app.get("/storage/hma")
+def get_hma_stats():
+    """Hybrid Memory Architecture: primary/secondary index bytes in RAM vs record data on SSD,
+    from the server's own statistics (summed across nodes), grouped by funnel tier."""
+    if not aerospike_service.is_connected():
+        raise HTTPException(status_code=503, detail="Aerospike is not connected.")
+    from services.hma_stats import collect
+    try:
+        return collect(aerospike_service.client, aerospike_service.namespace)
+    except Exception as e:
+        logger.error(f"HMA stats failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not read Aerospike statistics: {e}")
+
+
 @app.get("/aerospike/stats")
 def get_aerospike_stats():
     """
