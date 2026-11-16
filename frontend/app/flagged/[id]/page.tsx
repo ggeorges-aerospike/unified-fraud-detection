@@ -571,7 +571,13 @@ export default function FlaggedAccountDetailsPage() {
                                                                 <DollarSign className="h-4 w-4" />
                                                             </div>
                                                             <div>
-                                                                <p className="font-medium text-slate-900">{txn.recipient}</p>
+                                                                <p className="font-medium text-slate-900">
+                                                                    {txn.recipient}
+                                                                    {txn.payee_name && txn.payee_name !== txn.recipient && (
+                                                                        <span className="ml-2 text-xs font-normal text-slate-500">entered as “{txn.payee_name}”</span>
+                                                                    )}
+                                                                </p>
+                                                                {txn.memo && <p className="text-sm italic text-slate-600">“{txn.memo}”</p>}
                                                                 <div className="flex items-center gap-2 text-sm text-slate-500">
                                                                     <span>{txn.id}</span>
                                                                     <span>•</span>

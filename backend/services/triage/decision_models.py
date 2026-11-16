@@ -172,18 +172,53 @@ class MockDecisionModel:
         return _clamp(0.1 + ratio * 0.8)
 
     @staticmethod
-    def _recipient_is_customer_alias(state: Dict[str, Any]) -> float:
-        me = " ".join(sorted(_name_tokens((state.get("customer") or {}).get("name", ""))))
+    def _payee_is_customer(state: Dict[str, Any]) -> float:
+        """Typed payee name vs the customer's own name, for payees typed differently from the holder."""
+        me_toks = _name_tokens((state.get("customer") or {}).get("name", ""))
+        me = " ".join(sorted(me_toks))
         best = 0.0
-        for r in state.get("recipients") or []:
-            other = " ".join(sorted(_name_tokens(r.get("name", ""))))
-            if other:
-                best = max(best, difflib.SequenceMatcher(None, me, other).ratio())
-        if best >= 0.9:
-            return 0.93
-        if best >= 0.8:
-            return 0.6
-        return _clamp(0.03 + best * 0.12)
+        for p in state.get("mismatched_payees") or []:
+            typed = [t for t in _name_tokens(p.get("payee_name_entered", "")) if t not in ("savings", "account")]
+            holder = " ".join(sorted(_name_tokens(p.get("account_holder", ""))))
+            typed_s = " ".join(sorted(typed))
+            if not typed_s:
+                continue
+            to_me = difflib.SequenceMatcher(None, me, typed_s).ratio()
+            to_holder = difflib.SequenceMatcher(None, holder, typed_s).ratio()
+            # nickname/initial of the customer: shares the surname and a first-name initial
+            if me_toks and typed and typed[-1] == me_toks[-1] and typed[0][0] == me_toks[0][0]:
+                to_me = max(to_me, 0.9)
+            if to_me > to_holder:
+                best = max(best, to_me)
+        if best >= 0.85:
+            return 0.92
+        if best >= 0.75:
+            return 0.55
+        return _clamp(0.03 + best * 0.1)
+
+    _SCAM_WORDS = ("gift cards", "gift card", "crypto", "wallet recovery", "bail", "guaranteed", "customs",
+                   "release fee", "irs", "social security", "lottery", "visa fees", "tech support", "refund reversal")
+    _SPECIFIC_WORDS = ("closing", "escrow", "down payment", "tuition", "tax", "invoice", "deposit",
+                       "contractor", "remodel", "roof", "venue")
+
+    @staticmethod
+    def _mentions(text: str, words) -> bool:
+        """Whole-word / whole-phrase match ("irs" must not match "first")."""
+        t = (text or "").lower()
+        return any(re.search(rf"\b{re.escape(w)}\b", t) for w in words)
+
+    def _scam_language(self, state: Dict[str, Any]) -> float:
+        memos = [t.get("memo") or "" for t in state.get("recent_transfers") or []]
+        hits = sum(1 for m in memos if self._mentions(m, self._SCAM_WORDS))
+        return 0.94 if hits else 0.04
+
+    def _large_payment_explained(self, state: Dict[str, Any]) -> float:
+        large = state.get("large_transfers") or []
+        if not large:
+            return 0.5
+        ok = [self._mentions(t.get("memo") or "", self._SPECIFIC_WORDS) and len(t.get("memo") or "") > 12
+              for t in large]
+        return 0.9 if all(ok) else 0.08
 
     @staticmethod
     def _impossible_travel(state: Dict[str, Any]) -> float:
@@ -247,9 +282,12 @@ class MockDecisionModel:
 
         return {
             "mule_fan_out": sig((a["once"] - 6) / 2 + (a["per_week"] - 10) / 6),
-            "circular_ring": sig((a["two_way"] - 1.5) * 2.5 + (a["avg"] - 1500) / 1500),
-            "account_takeover": sig((a["new_devices"] - 0.5) * 1.5 + (a["max"] - 9000) / 1500),
-            "bust_out": sig(a["acct_new"] * 1.5 + (a["total"] - 30000) / 6000),
+            # A ring needs money flowing both ways with at least two recipients.
+            "circular_ring": sig((a["two_way"] - 1.5) * 2.5 + (a["avg"] - 1500) / 3000) if a["two_way"] >= 2 else 0.03,
+            # A single large payment alone is not a pattern: takeover needs a new device,
+            # bust-out needs a new account, each alongside large outflows.
+            "account_takeover": sig((a["max"] - 9000) / 3000) if a["new_devices"] else 0.03,
+            "bust_out": sig((a["total"] - 30000) / 10000) if a["acct_new"] else 0.03,
         }
 
     # -- the API --------------------------------------------------------------
@@ -262,7 +300,9 @@ class MockDecisionModel:
         pats = self._patterns(act)
         computed: Dict[str, Any] = {
             "email_matches_name": self._email_matches_name(state),
-            "recipient_is_customer_alias": self._recipient_is_customer_alias(state),
+            "payee_is_customer": self._payee_is_customer(state),
+            "scam_language": self._scam_language(state),
+            "large_payment_explained": self._large_payment_explained(state),
             "impossible_travel": self._impossible_travel(state),
             "activity_fits_profile": self._activity_fits_profile(act),
             "fraud_pattern_present": _clamp(max(pats.values()) if act["n"] else 0.03),

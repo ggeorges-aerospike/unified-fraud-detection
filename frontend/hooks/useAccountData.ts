@@ -129,6 +129,8 @@ export interface AccountData {
         recipient: string
         type: string
         risk: 'high' | 'medium' | 'low'
+        memo?: string
+        payee_name?: string
     }>
     devices: Array<{
         id: string
@@ -240,7 +242,9 @@ export function useAccountData(userId: string): UseAccountDataReturn {
                     amount: txnData.amount || 0,
                     recipient: txn.other_party?.name || 'Unknown',
                     type: txnData.type || 'transfer',
-                    risk: riskLevel as 'high' | 'medium' | 'low'
+                    risk: riskLevel as 'high' | 'medium' | 'low',
+                    memo: txnData.memo || '',
+                    payee_name: txnData.payee_name || '',
                 }
             })
             

@@ -1808,6 +1808,9 @@ class AerospikeService:
                     'status': txn.get('status', 'completed'),
                     'device_id': txn.get('device_id', ''),
                     'is_fraud': txn.get('is_fraud', False),
+                    # Customer-typed text (generator patterns that need judgment); omitted when absent.
+                    **({'memo': txn['memo']} if txn.get('memo') else {}),
+                    **({'payee_name': txn['payee_name']} if txn.get('payee_name') else {}),
                 }
                 grouped[record_key]['txs'][timestamp] = txn_entry
             

@@ -25,6 +25,8 @@ STATE_WINDOW_DAYS = 30
 # Show the most recent transfers and recipients in full and summarize the rest in code.
 MAX_TRANSFERS = 15
 MAX_RECIPIENTS = 15
+MAX_LARGE = 5
+MAX_MISMATCHED = 6
 
 # Facts about this bank's customers that the model cannot know on its own.
 BANK_NORMS = {
@@ -38,19 +40,21 @@ NORM_MAX_DISTINCT_RECIPIENTS = 10
 
 
 def norms_check(summary: Dict[str, Any]) -> tuple:
-    """(within_norms, detail) from a state's ``transfer_summary``."""
+    """(within_norms, detail, outside_only_by_amount) from a state's ``transfer_summary``."""
     out = []
+    by_amount = False
     n = summary.get("transfers_sent", 0) or 0
     span = summary.get("days_between_first_and_last") or 0
     if (summary.get("largest_transfer_usd") or 0) > NORM_MAX_TRANSFER_USD:
         out.append(f"largest transfer ${summary['largest_transfer_usd']:,.0f}")
+        by_amount = True
     if n >= 3:
         per_week = n / max(1.0, span) * 7
         if per_week > NORM_MAX_PER_WEEK:
             out.append(f"{per_week:.0f} transfers a week")
     if (summary.get("distinct_recipients") or 0) > NORM_MAX_DISTINCT_RECIPIENTS:
         out.append(f"{summary['distinct_recipients']} distinct recipients")
-    return (not out, "; ".join(out))
+    return (not out, "; ".join(out), by_amount and len(out) == 1)
 
 
 @dataclass
@@ -133,6 +137,8 @@ def build_state(aerospike, user_id: str, flagged: Dict[str, Any]) -> Optional[As
             "sent_at": t.get("timestamp", ""),
             "amount_usd": round(float(t.get("amount") or 0), 2),
             "recipient": names.get(cp) or "Unknown recipient",
+            "payee_name_entered": t.get("payee_name", ""),
+            "memo": t.get("memo", ""),
             "from_city": t.get("location", ""),
             "device": f"{dev.get('browser', 'unknown browser')} on {dev.get('os', 'unknown OS')}" if dev else "unknown device",
             "_received_from": received_from.get(cp, 0),
@@ -158,15 +164,25 @@ def build_state(aerospike, user_id: str, flagged: Dict[str, Any]) -> Optional[As
         ],
         transfers=transfers,
     )
-    within, detail = norms_check(state["transfer_summary"])
+    within, detail, only_amount = norms_check(state["transfer_summary"])
     facts = Facts(
         risk_score=float(flagged.get("risk_score") or 0),
         device_tied_to_confirmed_fraud=device_fraud,
         flagged_recipients=flagged_recips,
         within_bank_norms=within,
+        outside_only_by_amount=only_amount,
         norms_detail=detail,
     )
     return AssembledState(state, facts, round(read_ms, 2), sum(breakdown.values()), breakdown)
+
+
+_TITLE_WORDS = {"mr", "mrs", "ms", "miss", "dr", "phd", "md", "dds", "dvm", "jr", "sr", "ii", "iii", "iv"}
+
+
+def _norm_name(name: str) -> str:
+    """Case, punctuation and title-insensitive form, for an exact-match check in code."""
+    import re
+    return " ".join(w for w in re.split(r"[^a-z]+", (name or "").lower()) if w and w not in _TITLE_WORDS)
 
 
 def shape_state(
@@ -198,6 +214,16 @@ def shape_state(
             span_days = None
     recipients = sorted(paid.items(), key=lambda kv: (-kv[1]["times_paid"], kv[0]))
 
+    # Two lists code builds so the model judges only what needs judgment.
+    large = [t for t in transfers if t["amount_usd"] > NORM_MAX_TRANSFER_USD][:MAX_LARGE]
+    mismatched: List[Dict[str, str]] = []
+    seen = set()
+    for t in transfers:
+        typed, holder = (t.get("payee_name_entered") or "").strip(), t["recipient"]
+        if typed and _norm_name(typed) != _norm_name(holder) and (typed, holder) not in seen:
+            seen.add((typed, holder))
+            mismatched.append({"payee_name_entered": typed, "account_holder": holder})
+
     return {
         "customer": customer,
         "accounts": accounts,
@@ -213,7 +239,14 @@ def shape_state(
             "days_between_first_and_last": span_days,
             "distinct_cities": len({t.get("from_city") for t in transfers if t.get("from_city")}),
         },
-        "bank_norms": BANK_NORMS,
+        # Every transfer over the bank's typical size (computed in code), with its memo.
+        "large_transfers": [
+            {"sent_at": t["sent_at"][:16], "amount_usd": t["amount_usd"], "recipient": t["recipient"],
+             "memo": t.get("memo", "")}
+            for t in large
+        ],
+        # Payees the customer typed differently from the receiving account's holder (computed in code).
+        "mismatched_payees": mismatched[:MAX_MISMATCHED],
         "recent_transfers": [
             {k: (v[:16] if k == "sent_at" and isinstance(v, str) else v) for k, v in t.items() if not k.startswith("_")}
             for t in transfers[:MAX_TRANSFERS]

@@ -15,7 +15,7 @@ v0.2.0), served identically by Jev, Kev and Strands Decider:
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------------
 # Thresholds for reading Noul answers (probability the statement is true).
@@ -30,13 +30,17 @@ NOUL_NO = 0.3
 # almost everything unsettled. Each override is fitted on labelled demo data with a train /
 # held-out split, required to auto-clear no held-out fraud, then backed off for margin.
 #
-# Strands Decider 2B (strands-decider-2B-qwen3.5-v1-2610), fitted 2026-11-11 on 320 labelled
-# customers (160 fit / 160 held out): held-out benign auto-cleared 45%, held-out fraud 0 of 80.
+# Strands Decider 2B (strands-decider-2B-qwen3.5-v1-2610), measured 2026-11-16 on labelled demo data:
+#  - fraud_pattern_present: fitted on 320 customers (160 fit / 160 held out, 0 held-out fraud cleared).
+#  - scam_language / payee_is_customer: "yes" only raises priority to urgent (never clears), so it
+#    sits just above the highest benign score seen (0.31 / 0.45); "no" sits just above ordinary memos.
+#  - large_payment_explained keeps the generic 0.7: "yes" can enable an auto-clear, and vague
+#    fraud memos reached 0.60.
 MODEL_THRESHOLDS: Dict[str, Dict[str, tuple]] = {
     "decider": {
         "fraud_pattern_present": (0.56, 0.66),
-        "activity_fits_profile": (0.28, 0.38),
-        "impossible_travel": (0.55, 0.70),
+        "scam_language": (0.25, 0.40),
+        "payee_is_customer": (0.30, 0.50),
     },
 }
 
@@ -69,28 +73,30 @@ QUESTIONS: Dict[str, Dict[str, Any]] = {
             "false": "The email address uses a different person's name, a business unrelated to them, or random characters",
         },
     },
-    "recipient_is_customer_alias": {
+    # Asked only when code found a typed payee name that differs from the account holder's.
+    "payee_is_customer": {
         "type": "noul",
-        "instructions": "Is any person in `recipients` the customer themself under a variant of their name?",
+        "instructions": "Is any `payee_name_entered` in `mismatched_payees` the customer's own name, written differently?",
         "criteria": {
-            "true": "A recipient's name is the customer's name with a misspelling, swapped order, initial, or added title",
-            "false": "Every recipient's name belongs to a clearly different person",
+            "true": "An entered payee name is the customer's name with a misspelling, swapped order, nickname, initial, or a word like 'Savings' added",
+            "false": "Every entered payee name is a nickname or short form of the actual account holder, or another person entirely",
         },
     },
-    "impossible_travel": {
+    "scam_language": {
         "type": "noul",
-        "instructions": "Were transfers in `recent_transfers` sent from cities too far apart to travel between in the time separating them?",
+        "instructions": "Does any `memo` in `recent_transfers` describe a payment that scammers commonly demand?",
         "criteria": {
-            "true": "Two transfers hours apart come from cities a flight or more apart",
-            "false": "The cities and times between transfers could be covered by ordinary travel, such as transfers days apart or from the same region",
+            "true": "A memo mentions gift cards, crypto recovery or wallet fees, bail or an emergency for a relative, guaranteed investment returns, customs or release fees, a government agency demanding payment, a lottery fee, or travel costs for someone met online",
+            "false": "Memos describe rent, bills, purchases, gifts, or paying back friends and family, or are blank or vague",
         },
     },
-    "activity_fits_profile": {
+    # Asked only when code found transfers over the bank's typical size.
+    "large_payment_explained": {
         "type": "noul",
-        "instructions": "Do the amounts and frequency in `recent_transfers` fit an ordinary person with the occupation and age in `customer`?",
+        "instructions": "Does every transfer in `large_transfers` have a memo naming a specific, ordinary purpose?",
         "criteria": {
-            "true": "Transfer sizes and counts look like everyday bills, rent, and payments to the same few people for someone in this job",
-            "false": "Transfer sizes or counts are far beyond what this customer's job and age would explain",
+            "true": "Each memo names something concrete and ordinary, such as a home closing with an address, a car purchase, tuition, taxes, or a contractor invoice",
+            "false": "A memo is blank or vague (like 'payment', 'funds', or 'as discussed'), or describes something unusual",
         },
     },
     # Choice always picks an option, so it is paired with a Noul that asks whether
@@ -114,6 +120,28 @@ QUESTIONS: Dict[str, Dict[str, Any]] = {
 QUESTIONS_SPEC_NOULS = {q: spec for q, spec in QUESTIONS.items() if spec["type"] == "noul"}
 
 
-def request_questions() -> Dict[str, Dict[str, Any]]:
-    """The ``questions`` object for a /v1/systemone request (a copy, safe to mutate)."""
-    return {name: dict(q) for name, q in QUESTIONS.items()}
+# Questions that only make sense when code found something to judge. When skipped, the
+# truth table uses the reading code already knows (nothing to judge -> that reading).
+CONDITIONAL = {
+    "payee_is_customer": ("mismatched_payees", "no"),
+    "large_payment_explained": ("large_transfers", "n/a"),
+}
+
+
+def request_questions(state: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """The ``questions`` object for a /v1/systemone request (a copy, safe to mutate).
+
+    With a ``state``, conditional questions whose input list is empty are left out: an empty
+    list is something code already knows, and the model can read emptiness as a signal.
+    """
+    out = {}
+    for name, q in QUESTIONS.items():
+        if state is not None and name in CONDITIONAL and not state.get(CONDITIONAL[name][0]):
+            continue
+        out[name] = dict(q)
+    return out
+
+
+def skipped_readings(state: Dict[str, Any]) -> Dict[str, str]:
+    """Readings code supplies for the conditional questions it did not ask."""
+    return {name: reading for name, (field, reading) in CONDITIONAL.items() if not state.get(field)}

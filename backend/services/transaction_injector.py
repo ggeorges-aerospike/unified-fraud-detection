@@ -27,6 +27,7 @@ from collections import defaultdict
 from gremlin_python.process.graph_traversal import __
 
 from services.progress_service import progress_service
+from services import txn_text
 
 logger = logging.getLogger('fraud_detection.transaction_injector')
 
@@ -112,7 +113,13 @@ class TransactionInjector:
             # feature-detection window (feature_service.default_window_days = 7).
             # Normal transactions still spread over the full spread_days for history.
             'fraud_recency_days': 7,
+            # Patterns that need judgment rather than arithmetic (see services/txn_text.py):
+            'legit_large_count': 40,         # BENIGN customers making one large, well-explained payment
+            'scam_victim_count': 25,         # victims sending 2-3 normal-sized transfers with scam memos
+            'alias_mule_count': 15,          # normal-sized transfers to someone else typed as the customer's own name
         }
+        # Ground-truth label per gen_type, for offline evaluation only (never written to KV).
+        self.benign_gen_types = {'HISTORICAL', 'LEGIT_LARGE'}
     
     def _get_account_lock(self, account_id: str) -> threading.Lock:
         """
@@ -870,6 +877,20 @@ class TransactionInjector:
             for txn in all_fraud_txns:
                 graph_transactions.append(txn['graph'])
                 kv_transactions.extend(txn['kv'])
+
+            # Patterns that need reading text (memos, typed payee names), then text for everything else.
+            user_names = self._prefetch_user_names()
+            arithmetic_fraud_users = {
+                account_to_user.get(t['graph']['sender_account_id']) for t in all_fraud_txns
+            }
+            text_patterns = self._generate_text_patterns(
+                accounts, account_to_user, user_to_devices, user_names, arithmetic_fraud_users
+            )
+            for txns in text_patterns.values():
+                for txn in txns:
+                    graph_transactions.append(txn['graph'])
+                    kv_transactions.extend(txn['kv'])
+            self._annotate_text(graph_transactions, kv_transactions, user_names)
             
             result["fraud_transactions"] = len(all_fraud_txns)
             result["fraud_patterns"] = {
@@ -877,6 +898,9 @@ class TransactionInjector:
                 "velocity_anomalies": len(velocity_anomaly_txns),
                 "amount_anomalies": len(amount_anomaly_txns),
                 "new_account_fraud": len(new_account_fraud_txns),
+                "legit_large_benign": len(text_patterns['LEGIT_LARGE']),
+                "scam_victims": len(text_patterns['SCAM_VICTIM']),
+                "alias_mules": len(text_patterns['ALIAS_MULE']),
             }
             progress_service.update_progress(
                 self.OPERATION_ID, 2, 
@@ -1007,6 +1031,167 @@ class TransactionInjector:
         
         return result
     
+    # ------------------------------------------------------------------------------------------
+    # Text-bearing patterns: memos and typed payee names (judgment, not arithmetic)
+    # ------------------------------------------------------------------------------------------
+
+    def _build_txn(
+        self,
+        sender: str,
+        receiver: str,
+        amount: float,
+        timestamp: str,
+        gen_type: str,
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]],
+        memo: str = "",
+        payee_name: str = "",
+        txn_type: str = 'transfer',
+    ) -> Dict[str, Any]:
+        """One transfer in the {'graph', 'kv'} shape the bulk pipeline consumes."""
+        txn_id = str(uuid.uuid4())
+        location = random.choice(self._run_locations())
+        sender_user = account_to_user.get(sender, '')
+        receiver_user = account_to_user.get(receiver, '')
+        devices = user_to_devices.get(sender_user) or []
+        device_id = random.choice(devices) if devices else ''
+        common = {
+            'txn_id': txn_id, 'amount': round(amount, 2), 'type': txn_type,
+            'method': 'electronic_transfer', 'location': location, 'timestamp': timestamp,
+            'status': 'completed', 'device_id': device_id, 'is_fraud': False,
+            'memo': memo, 'payee_name': payee_name,
+        }
+        return {
+            'graph': {
+                'sender_account_id': sender, 'receiver_account_id': receiver, 'txn_id': txn_id,
+                'amount': round(amount, 2), 'currency': self._run_currency(), 'type': txn_type,
+                'method': 'electronic_transfer', 'location': location, 'timestamp': timestamp,
+                'status': 'completed', 'gen_type': gen_type, 'device_id': device_id,
+            },
+            'kv': [
+                {**common, 'account_id': sender, 'direction': 'out', 'counterparty': receiver,
+                 'user_id': sender_user, 'counterparty_user_id': receiver_user},
+                {**common, 'account_id': receiver, 'direction': 'in', 'counterparty': sender,
+                 'user_id': receiver_user, 'counterparty_user_id': sender_user},
+            ],
+        }
+
+    def _recent_burst_timestamps(self, n: int, min_gap_days: float, max_gap_days: float) -> List[str]:
+        """n ascending timestamps inside the recent detection window, never in the future."""
+        recency = max(1, self.fraud_config.get('fraud_recency_days', 7))
+        start = datetime.now() - timedelta(days=random.uniform(recency * 0.6, recency - 0.2))
+        out, t = [], start
+        for _ in range(n):
+            out.append(min(t, datetime.now() - timedelta(minutes=5)).isoformat())
+            t += timedelta(days=random.uniform(min_gap_days, max_gap_days), hours=random.uniform(0, 6))
+        return out
+
+    def _pick_senders(self, accounts: List[str], account_to_user: Dict[str, str], k: int,
+                      exclude_users: Set[str]) -> List[str]:
+        picked, users = [], set()
+        for acc in random.sample(accounts, min(len(accounts), k * 4)):
+            u = account_to_user.get(acc)
+            if u and u not in exclude_users and u not in users:
+                picked.append(acc)
+                users.add(u)
+            if len(picked) == k:
+                break
+        return picked
+
+    def _generate_text_patterns(
+        self,
+        accounts: List[str],
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]],
+        user_names: Dict[str, str],
+        exclude_users: Set[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """LEGIT_LARGE (benign), SCAM_VICTIM and ALIAS_MULE (fraud) — each needs reading the text."""
+        rng = random.Random()
+        cfg = self.fraud_config
+        n_total = cfg['legit_large_count'] + cfg['scam_victim_count'] + cfg['alias_mule_count']
+        senders = self._pick_senders(accounts, account_to_user, n_total, exclude_users)
+        legit = senders[:cfg['legit_large_count']]
+        victims = senders[len(legit):len(legit) + cfg['scam_victim_count']]
+        mules = senders[len(legit) + len(victims):]
+        out: Dict[str, List[Dict[str, Any]]] = {'LEGIT_LARGE': [], 'SCAM_VICTIM': [], 'ALIAS_MULE': []}
+
+        def other_account(sender: str) -> str:
+            while True:
+                r = random.choice(accounts)
+                if account_to_user.get(r) != account_to_user.get(sender):
+                    return r
+
+        # Benign: one large payment with a specific, ordinary purpose.
+        for s in legit:
+            r = other_account(s)
+            amount = random.choice([random.uniform(8000, 25000), random.uniform(25000, 90000)])
+            [ts] = self._recent_burst_timestamps(1, 0, 0)
+            out['LEGIT_LARGE'].append(self._build_txn(
+                s, r, amount, ts, 'LEGIT_LARGE', account_to_user, user_to_devices,
+                memo=txn_text.legit_large_memo(rng),
+                payee_name=txn_text.payee_as_typed(user_names.get(account_to_user.get(r, ''), ''), rng)))
+
+        # Fraud: a victim sends 2-3 normal-sized transfers a few days apart, all with the scam story.
+        for s in victims:
+            story = txn_text.scam_story(rng)
+            n = random.choice([2, 3])
+            payees = [other_account(s) for _ in range(random.choice([1, 2]))]
+            for i, ts in enumerate(self._recent_burst_timestamps(n, 1.2, 2.2)):
+                r = payees[i % len(payees)]
+                out['SCAM_VICTIM'].append(self._build_txn(
+                    s, r, random.uniform(1500, 4800), ts, 'SCAM_VICTIM', account_to_user, user_to_devices,
+                    memo=txn_text.scam_memo(story, rng),
+                    payee_name=txn_text.payee_as_typed(user_names.get(account_to_user.get(r, ''), ''), rng)))
+
+        # Fraud: cash-out to a mule account typed as the customer's own name.
+        for s in mules:
+            mule = other_account(s)
+            own = user_names.get(account_to_user.get(s, ''), '')
+            alias = txn_text.alias_of(own, rng)
+            for ts in self._recent_burst_timestamps(random.choice([2, 3]), 1.2, 2.2):
+                out['ALIAS_MULE'].append(self._build_txn(
+                    s, mule, random.uniform(2000, 4800), ts, 'ALIAS_MULE', account_to_user, user_to_devices,
+                    memo=txn_text.alias_memo(rng), payee_name=alias))
+        return out
+
+    def _annotate_text(
+        self,
+        graph_transactions: List[Dict[str, Any]],
+        kv_transactions: List[Dict[str, Any]],
+        user_names: Dict[str, str],
+    ) -> None:
+        """Give every transfer that has no text yet a memo and typed payee name fitting its pattern."""
+        rng = random.Random()
+        gen = {g['txn_id']: g.get('gen_type', 'HISTORICAL') for g in graph_transactions}
+        text: Dict[str, Tuple[str, str]] = {}
+        for kv in kv_transactions:
+            if kv.get('direction') != 'out' or kv.get('memo') is not None or kv['txn_id'] in text:
+                continue
+            g = gen.get(kv['txn_id'], 'HISTORICAL')
+            if g == 'HISTORICAL':
+                memo = txn_text.ordinary_memo(rng)
+            elif g == 'AMOUNT_ANOMALY':
+                memo = (txn_text.scam_memo(txn_text.scam_story(rng), rng) if rng.random() < 0.3
+                        else txn_text.vague_memo(rng))
+            else:  # rings, velocity, new-account fraud mimic ordinary memos or leave them vague
+                memo = txn_text.ordinary_memo(rng) if rng.random() < 0.5 else txn_text.vague_memo(rng)
+            payee = txn_text.payee_as_typed(user_names.get(kv.get('counterparty_user_id', ''), ''), rng)
+            text[kv['txn_id']] = (memo, payee)
+        for kv in kv_transactions:
+            if kv.get('memo') is None and kv['txn_id'] in text:
+                kv['memo'], kv['payee_name'] = text[kv['txn_id']]
+
+    def _prefetch_user_names(self) -> Dict[str, str]:
+        if not (self.kv and self.kv.is_connected()):
+            return {}
+        try:
+            from services.aerospike_service import SET_USERS
+            return {u.get('user_id'): u.get('name', '') for u in self.kv.scan_all(SET_USERS, limit=1_000_000)}
+        except Exception as e:
+            logger.warning(f"Could not prefetch user names for memos: {e}")
+            return {}
+
     def _update_progress(self, increment: int = 1, message: Optional[str] = None):
         """Update progress counter and report to progress service."""
         self._current_progress += increment

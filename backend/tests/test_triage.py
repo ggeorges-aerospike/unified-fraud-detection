@@ -29,9 +29,8 @@ from services.triage.questions import AUTO_CLEAR_MAX_RISK, QUESTIONS, SCAM_PATTE
 def nouls(**p: float) -> Dict[str, Any]:
     base = {
         "email_matches_name": 0.95,
-        "recipient_is_customer_alias": 0.05,
-        "impossible_travel": 0.05,
-        "activity_fits_profile": 0.9,
+        "payee_is_customer": 0.05,
+        "scam_language": 0.05,
         "fraud_pattern_present": 0.05,
     }
     base.update(p)
@@ -57,10 +56,13 @@ class TestTruthTable:
         from services.triage.state import norms_check
         burst = {"transfers_sent": 39, "distinct_recipients": 39, "largest_transfer_usd": 4794.75,
                  "days_between_first_and_last": 24.8}
-        ok, detail = norms_check(burst)
-        assert not ok and "39 distinct recipients" in detail and "transfers a week" in detail
+        ok, detail, only_amount = norms_check(burst)
+        assert not ok and "39 distinct recipients" in detail and "transfers a week" in detail and not only_amount
         assert norms_check({"transfers_sent": 2, "distinct_recipients": 2, "largest_transfer_usd": 4200,
                             "days_between_first_and_last": 9})[0] is True
+        big = norms_check({"transfers_sent": 1, "distinct_recipients": 1, "largest_transfer_usd": 42000,
+                           "days_between_first_and_last": None})
+        assert big[0] is False and big[2] is True
 
     def test_score_guardrail_blocks_auto_clear(self):
         d = decide(nouls(), Facts(risk_score=AUTO_CLEAR_MAX_RISK, within_bank_norms=True))
@@ -76,22 +78,51 @@ class TestTruthTable:
         assert d.pattern == "mule_fan_out"
 
     @pytest.mark.parametrize("extra", [
-        {"recipient_is_customer_alias": 0.9},
-        {"impossible_travel": 0.9},
         {"email_matches_name": 0.1},
     ])
     def test_pattern_corroborated_is_urgent(self, extra):
         d = decide(nouls(fraud_pattern_present=0.9, **extra), Facts(risk_score=50))
         assert (d.outcome, d.rule) == (ESCALATE_URGENT, "pattern_corroborated")
 
+    def test_scam_language_is_urgent_even_within_norms(self):
+        d = decide(nouls(scam_language=0.95), Facts(risk_score=35, within_bank_norms=True))
+        assert (d.outcome, d.rule) == (ESCALATE_URGENT, "scam_language")
+
+    def test_payee_alias_is_urgent(self):
+        d = decide(nouls(payee_is_customer=0.9), Facts(risk_score=35, within_bank_norms=True))
+        assert (d.outcome, d.rule) == (ESCALATE_URGENT, "payee_alias")
+
+    def test_explained_large_payment_clears_when_only_size_is_unusual(self):
+        ans = nouls(large_payment_explained=0.9)
+        f = Facts(risk_score=40, within_bank_norms=False, outside_only_by_amount=True)
+        d = decide(ans, f)
+        assert (d.outcome, d.rule) == (AUTO_CLEAR, "explained_large_payment")
+
+    @pytest.mark.parametrize("ans,facts", [
+        (dict(large_payment_explained=0.1), dict(outside_only_by_amount=True)),        # vague memo
+        (dict(large_payment_explained=0.5), dict(outside_only_by_amount=True)),        # unsettled
+        (dict(large_payment_explained=0.9), dict(outside_only_by_amount=False)),       # also too frequent
+        (dict(large_payment_explained=0.9, fraud_pattern_present=0.9), dict(outside_only_by_amount=True)),
+    ])
+    def test_large_payment_does_not_clear_otherwise(self, ans, facts):
+        d = decide(nouls(**ans), Facts(risk_score=40, within_bank_norms=False, **facts))
+        assert d.outcome != AUTO_CLEAR
+
+    def test_known_readings_fill_skipped_questions(self):
+        ans = nouls()
+        ans.pop("payee_is_customer")
+        assert decide(ans, Facts(risk_score=40, within_bank_norms=True)).outcome == ESCALATE
+        d = decide(ans, Facts(risk_score=40, within_bank_norms=True), known={"payee_is_customer": "no"})
+        assert d.outcome == AUTO_CLEAR
+
     def test_pattern_alone_escalates(self):
         d = decide(nouls(fraud_pattern_present=0.9), Facts(risk_score=50))
         assert (d.outcome, d.rule) == (ESCALATE, "pattern_uncorroborated")
 
     def test_unsettled_answer_never_clears(self):
-        d = decide(nouls(activity_fits_profile=0.5), Facts(risk_score=50))
+        d = decide(nouls(scam_language=0.5), Facts(risk_score=50, within_bank_norms=True))
         assert (d.outcome, d.rule) == (ESCALATE, "unsettled")
-        assert d.readings["activity_fits_profile"] == "unsettled"
+        assert d.readings["scam_language"] == "unsettled"
 
     def test_missing_answers_escalate(self):
         d = decide({}, Facts(risk_score=10))
@@ -108,10 +139,11 @@ class TestTruthTable:
 
 def test_model_specific_bands_change_readings():
     from services.triage.questions import thresholds_for
-    ans = nouls(fraud_pattern_present=0.5, activity_fits_profile=0.42, impossible_travel=0.4)
-    assert decide(ans, Facts(risk_score=50)).outcome == ESCALATE                      # generic bands: unsettled
-    d = decide(ans, Facts(risk_score=50, within_bank_norms=True), thresholds_for("decider"))
-    assert (d.outcome, d.rule) == (AUTO_CLEAR, "benign_activity")                       # decider bands settle it
+    ans = nouls(fraud_pattern_present=0.68)
+    facts = Facts(risk_score=50, within_bank_norms=True)
+    assert decide(ans, facts).outcome == AUTO_CLEAR                                   # generic: 0.68 is unsettled
+    d = decide(ans, facts, thresholds_for("decider"))
+    assert (d.outcome, d.rule) == (ESCALATE, "pattern_uncorroborated")               # decider: 0.68 reads yes
     for q, (no_at, yes_at) in thresholds_for("decider").items():
         assert 0 <= no_at < yes_at <= 1, q
 
@@ -150,6 +182,14 @@ def _state(**over) -> Dict[str, Any]:
 
 
 class TestMockDecisionModel:
+    def test_conditional_questions_skipped_when_nothing_to_judge(self):
+        from services.triage.questions import skipped_readings
+        qs = request_questions(_state())
+        assert "payee_is_customer" not in qs and "large_payment_explained" not in qs
+        assert skipped_readings(_state()) == {"payee_is_customer": "no", "large_payment_explained": "n/a"}
+        qs = request_questions(_state(large_transfers=[{"amount_usd": 9000, "memo": "x"}]))
+        assert "large_payment_explained" in qs
+
     def test_answers_match_openapi_shapes(self):
         resp = MockDecisionModel().ask(_state(), request_questions())
         assert set(resp) == {"model", "answers", "usage"}
@@ -175,10 +215,22 @@ class TestMockDecisionModel:
         bad = _state(customer={"name": "Kaitlyn Castaneda", "email": "xq7z.trader99@mail.com"})
         assert m._email_matches_name(bad) <= 0.3
 
-    def test_recipient_alias_fuzzy_match(self):
-        s = _state(recipients=[{"name": "Katlyn Castaneda", "times_paid": 3, "total_usd": 9000}])
-        assert MockDecisionModel()._recipient_is_customer_alias(s) >= 0.7
-        assert MockDecisionModel()._recipient_is_customer_alias(_state()) <= 0.3
+    def test_payee_alias_fuzzy_match(self):
+        m = MockDecisionModel()
+        alias = _state(mismatched_payees=[{"payee_name_entered": "Katlyn Castaneda", "account_holder": "Bob Ruiz"}])
+        assert m._payee_is_customer(alias) >= 0.7
+        nickname_of_holder = _state(mismatched_payees=[{"payee_name_entered": "Mike Waters",
+                                                        "account_holder": "Michael Waters"}])
+        assert m._payee_is_customer(nickname_of_holder) <= 0.3
+
+    def test_scam_and_explained_memos(self):
+        m = MockDecisionModel()
+        scam = _state(recent_transfers=[{"sent_at": "2026-11-10T10:00", "amount_usd": 2000,
+                                         "memo": "Gift cards for IRS settlement – case #123456"}])
+        assert m._scam_language(scam) >= 0.7 and m._scam_language(_state()) <= 0.3
+        good = _state(large_transfers=[{"amount_usd": 42000, "memo": "Closing funds – 14 Elm St, escrow #88213"}])
+        vague = _state(large_transfers=[{"amount_usd": 42000, "memo": "payment"}])
+        assert m._large_payment_explained(good) >= 0.7 and m._large_payment_explained(vague) <= 0.3
 
     def test_impossible_travel(self):
         t = datetime(2026, 11, 11, 12, 0)

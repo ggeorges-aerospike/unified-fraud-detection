@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .decision import AUTO_CLEAR, ESCALATE, ESCALATE_URGENT, decide
 from .decision_models import DecisionModel, DecisionModelError
-from .questions import request_questions, thresholds_for
+from .questions import request_questions, skipped_readings, thresholds_for
 from .state import build_state
 
 logger = logging.getLogger("fraud_detection.triage")
@@ -77,7 +77,8 @@ class TriageService:
         if not assembled:
             return {"user_id": user_id, "error": "Customer record missing"}
 
-        questions = request_questions()
+        questions = request_questions(assembled.state)
+        known = skipped_readings(assembled.state)
         bands = thresholds_for(self.model.mode)
         request = {"model": self.model.name, "state": assembled.state, "questions": questions}
         t0 = time.perf_counter()
@@ -85,7 +86,7 @@ class TriageService:
         response: Dict[str, Any] = {}
         try:
             response = self.model.ask(assembled.state, questions)
-            decision = decide(response.get("answers") or {}, assembled.facts, bands)
+            decision = decide(response.get("answers") or {}, assembled.facts, bands, known)
             outcome, rule, explanation = decision.outcome, decision.rule, decision.explanation
             readings, pattern = decision.readings, decision.pattern
         except DecisionModelError as e:
@@ -119,6 +120,7 @@ class TriageService:
                 "device_confirmed_fraud": assembled.facts.device_tied_to_confirmed_fraud,
                 "flagged_recipients": assembled.facts.flagged_recipients,
                 "within_bank_norms": assembled.facts.within_bank_norms,
+                "outside_only_by_amount": assembled.facts.outside_only_by_amount,
                 "norms_detail": assembled.facts.norms_detail,
             },
             "answers": response.get("answers") or {},

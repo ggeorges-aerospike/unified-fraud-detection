@@ -580,6 +580,8 @@ def get_user(user_id: str):
                                 'type': txn.get('type', 'transfer'),
                                 'fraud_score': txn.get('fraud_score', 0) or 0,
                                 'status': 'flagged' if txn.get('is_fraud') else 'clean',
+                                'memo': txn.get('memo', ''),
+                                'payee_name': txn.get('payee_name', ''),
                             },
                             'other_party': {
                                 'id': counterparty_user_id,
