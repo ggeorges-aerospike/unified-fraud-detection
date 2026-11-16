@@ -22,10 +22,13 @@ import {
     RefreshCw,
     CheckCircle,
     XCircle,
-    Snowflake
+    Snowflake,
+    Scale,
+    Siren
 } from 'lucide-react'
 import useSWR from 'swr'
 import { useAppConfig } from '@/hooks/useAppConfig'
+import TriageFunnel from '@/components/Flagged/TriageFunnel'
 
 interface FlaggedAccount {
     account_id: string
@@ -43,6 +46,8 @@ interface FlaggedAccount {
     risk_factors?: string[]
     account_predictions?: Array<{ account_id: string; risk_score: number }>
     highest_risk_account_id?: string
+    priority?: 'urgent' | 'normal'
+    triage?: { outcome?: string; rule?: string; pattern?: string; mode?: string }
 }
 
 interface FlaggedStats {
@@ -109,11 +114,22 @@ const statusConfig = {
         label: 'Cleared', 
         color: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
         icon: CheckCircle
+    },
+    auto_cleared: {
+        label: 'Auto-cleared by decision model',
+        color: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-400',
+        icon: Scale
     }
 }
 
+const triageLabel: Record<string, string> = {
+    auto_clear: 'Triage: auto-clear',
+    escalate: 'Triage: escalate',
+    escalate_urgent: 'Triage: escalate',
+}
+
 export default function FlaggedAccountsPage() {
-    const [filter, setFilter] = useState<'all' | 'pending_review' | 'under_investigation' | 'completed'>('all')
+    const [filter, setFilter] = useState<'all' | 'pending_review' | 'under_investigation' | 'completed' | 'auto_cleared'>('all')
     const [searchQuery, setSearchQuery] = useState('')
     const [debouncedSearch, setDebouncedSearch] = useState('')
     const [page, setPage] = useState(1)
@@ -221,6 +237,9 @@ export default function FlaggedAccountsPage() {
                 </div>
             )}
 
+            {/* Four-tier funnel: predictive -> decision-model triage -> AI agents -> analyst */}
+            <TriageFunnel onChanged={handleRefresh} />
+
             {/* Stats Section */}
             <div className="grid gap-4 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
                 {statsLoading ? (
@@ -318,6 +337,7 @@ export default function FlaggedAccountsPage() {
                                 <TabsTrigger value="pending_review">Pending</TabsTrigger>
                                 <TabsTrigger value="under_investigation">Investigating</TabsTrigger>
                                 <TabsTrigger value="completed">Completed</TabsTrigger>
+                                <TabsTrigger value="auto_cleared">Auto-cleared</TabsTrigger>
                             </TabsList>
                         </Tabs>
                     </div>
@@ -385,6 +405,19 @@ export default function FlaggedAccountsPage() {
                                                                 <StatusIcon className="h-3 w-3" />
                                                                 {status.label}
                                                             </span>
+                                                            {account.status === 'pending_review' && account.priority === 'urgent' && (
+                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                                                                    <Siren className="h-3 w-3" />
+                                                                    Urgent
+                                                                </span>
+                                                            )}
+                                                            {account.triage?.outcome && account.status !== 'auto_cleared' && (
+                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border text-muted-foreground">
+                                                                    <Scale className="h-3 w-3" />
+                                                                    {triageLabel[account.triage.outcome] ?? account.triage.outcome}
+                                                                    {account.triage.pattern ? ` · ${account.triage.pattern.replace(/_/g, ' ')}` : ''}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1 flex-wrap">
                                                             <span className="flex items-center gap-1">

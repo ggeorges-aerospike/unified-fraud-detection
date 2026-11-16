@@ -130,6 +130,16 @@ services:
       - ADK_MODEL=${ADK_MODEL:-gemini-3.1-flash-lite}
       # Backup models tried when ADK_MODEL keeps returning 429/5xx after retries
       - ADK_FALLBACK_MODELS=${ADK_FALLBACK_MODELS:-gemini-3.5-flash-lite,gemini-3.1-flash-lite}
+      # Tier-2 decision-model triage: mock | decider (Strands Decider) | kev | jev (TypeSafe) | off.
+      # Self-hosted servers default to host.docker.internal (:8000 decider, :8009 kev).
+      - DECISION_MODEL=${DECISION_MODEL:-mock}
+      - DECISION_MODEL_URL=${DECISION_MODEL_URL:-}
+      - DECISION_MODEL_NAME=${DECISION_MODEL_NAME:-}
+      - DECISION_MODEL_API_KEY=${DECISION_MODEL_API_KEY:-}
+      - DECISION_MODEL_TIMEOUT_S=${DECISION_MODEL_TIMEOUT_S:-30}
+      - DECISION_MODEL_CONCURRENCY=${DECISION_MODEL_CONCURRENCY:-16}
+      - DECISION_MODEL_MOCK_LATENCY_MS=${DECISION_MODEL_MOCK_LATENCY_MS:-70-250}
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
       - LLM_RETRY_ATTEMPTS=${LLM_RETRY_ATTEMPTS:-5}
       # Run the three evidence specialists concurrently (ADK ParallelAgent)
       - ADK_PARALLEL_EVIDENCE=${ADK_PARALLEL_EVIDENCE:-true}

@@ -48,6 +48,7 @@ class FlaggedAccountService:
         self._lock = Lock()
         self._aerospike = None  # Will be set if Aerospike is available
         self._feature_service = None  # Will be set for feature computation
+        self._triage = None  # Tier-2 decision-model triage (services.triage.TriageService)
         
         # In-memory storage (used as fallback when Aerospike not available)
         self._flagged_accounts: Dict[str, Dict[str, Any]] = {}
@@ -59,7 +60,8 @@ class FlaggedAccountService:
             "schedule_enabled": True,
             "schedule_time": "21:30",
             "cooldown_days": 7,
-            "risk_threshold": 50  # Demo data: fraud bursts are injected within the recent feature window so they score >=50
+            "risk_threshold": 50,  # Demo data: fraud bursts are injected within the recent feature window so they score >=50
+            "triage_enabled": True,  # Run decision-model triage on newly flagged customers after detection
         }
         
         # Ensure data directory exists
@@ -73,6 +75,22 @@ class FlaggedAccountService:
         self._aerospike = aerospike_service
         logger.info("Aerospike service configured for flagged account storage")
     
+    def set_triage_service(self, triage_service):
+        """Attach tier-2 triage; newly flagged customers are triaged after each detection run."""
+        self._triage = triage_service
+
+    def last_detection_job(self) -> Optional[Dict[str, Any]]:
+        """Most recent detection run; falls back to Aerospike after a restart."""
+        if self._detection_history:
+            return self._detection_history[-1]
+        if self._use_aerospike():
+            try:
+                jobs = self._aerospike.get_detection_history(limit=1)
+                return jobs[0] if jobs else None
+            except Exception as e:
+                logger.warning(f"Could not read detection history: {e}")
+        return None
+
     def set_feature_service(self, feature_service):
         """Set the feature service for computing account features."""
         self._feature_service = feature_service
@@ -171,9 +189,10 @@ class FlaggedAccountService:
                 # Save config
                 self._aerospike.save_config(self._config)
                 
-                # Save flagged accounts
-                for account_id, account_data in self._flagged_accounts.items():
-                    self._aerospike.flag_account(account_data)
+                # Flagged accounts are NOT re-written here: _flag_user_with_accounts
+                # writes each one when it is flagged, and later changes (triage,
+                # analyst and agent decisions) are written in place. Re-putting this
+                # in-process cache reverted those statuses on every config save.
                 
                 # Save history
                 for job in self._detection_history[-100:]:
@@ -218,6 +237,8 @@ class FlaggedAccountService:
                 self._config["cooldown_days"] = max(1, int(config["cooldown_days"]))
             if "risk_threshold" in config:
                 self._config["risk_threshold"] = max(0, min(100, float(config["risk_threshold"])))
+            if "triage_enabled" in config:
+                self._config["triage_enabled"] = bool(config["triage_enabled"])
             
             self._save_data()
             return self._config.copy()
@@ -420,6 +441,7 @@ class FlaggedAccountService:
                 
                 # Step 3: Evaluate each user
                 user_count = 0
+                flagged_ids: List[str] = []
                 for user in all_users:
                     user_id = user.get("user_id")
                     if not user_id:
@@ -478,6 +500,7 @@ class FlaggedAccountService:
                             if risk_score >= self._config["risk_threshold"]:
                                 self._flag_user_with_accounts(user, user_prediction, account_predictions)
                                 job_result["newly_flagged"] += 1
+                                flagged_ids.append(user_id)
                             
                     except Exception as e:
                         logger.error(f"Error evaluating user {user_id}: {e}")
@@ -507,6 +530,17 @@ class FlaggedAccountService:
                 
                 # Save data
                 self._save_data()
+
+                # Tier 2: decision-model triage of everyone just flagged
+                if self._triage and self._triage.enabled and self._config.get("triage_enabled", True) and flagged_ids:
+                    progress_service.update_progress(
+                        OPERATION_ID, user_count, f"Decision-model triage of {len(flagged_ids)} flagged customers..."
+                    )
+                    try:
+                        job_result["triage"] = self._triage.triage_many(flagged_ids)
+                    except Exception as e:
+                        logger.error(f"Triage after detection failed: {e}")
+                        job_result["errors"].append(f"Triage: {e}")
                 
                 # Complete progress tracking
                 progress_service.complete_operation(
@@ -573,6 +607,14 @@ class FlaggedAccountService:
             ],
             "model_version": user_prediction.get("model_version", "unknown"),
             "confidence": user_prediction.get("confidence", 0),
+            # A re-flag opens a new case: put() merges bins, so explicitly blank the
+            # previous case's triage and resolution instead of inheriting them.
+            "triage": {},
+            "priority": "normal",
+            "resolution": "",
+            "resolution_date": "",
+            "resolution_notes": "",
+            "resolved_by": "",
         }
         
         # Store in Aerospike and local cache
@@ -941,8 +983,12 @@ class FlaggedAccountService:
                    search_lower in a.get("user_id", "").lower()
             ]
         
-        # Sort by risk score (highest first), then alphabetically by account holder name for ties
-        accounts.sort(key=lambda x: (-x.get("risk_score", 0), x.get("account_holder", "").lower()))
+        # Urgent triage escalations first, then risk score (highest first), then name for ties
+        accounts.sort(key=lambda x: (
+            0 if x.get("priority") == "urgent" else 1,
+            -x.get("risk_score", 0),
+            x.get("account_holder", "").lower(),
+        ))
         
         # Paginate
         total = len(accounts)
@@ -1280,6 +1326,8 @@ class FlaggedAccountService:
                 "monitoring": 0,
                 "confirmed_fraud": 0,
                 "cleared": 0,
+                "auto_cleared": 0,
+                "urgent": 0,
                 "avg_risk_score": 0,
                 "total_flagged_amount": 0
             }
@@ -1292,6 +1340,8 @@ class FlaggedAccountService:
             "monitoring": len([a for a in accounts if a.get("status") == "monitoring"]),
             "confirmed_fraud": len([a for a in accounts if a.get("status") == "confirmed_fraud"]),
             "cleared": len([a for a in accounts if a.get("status") == "cleared"]),
+            "auto_cleared": len([a for a in accounts if a.get("status") == "auto_cleared"]),
+            "urgent": len([a for a in accounts if a.get("status") == "pending_review" and a.get("priority") == "urgent"]),
             "avg_risk_score": sum(a.get("risk_score", 0) for a in accounts) / len(accounts) if accounts else 0,
             "total_flagged_amount": sum(a.get("total_flagged_amount", 0) for a in accounts)
         }

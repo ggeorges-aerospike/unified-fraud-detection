@@ -48,12 +48,14 @@ SET_ACCOUNT_FACT = 'account_fact'      # PK = account_id
 SET_DEVICE_FACT = 'device_fact'        # PK = device_id
 SET_INVESTIGATIONS = 'investigations'  # PK = investigation_id
 SET_CASE_MEMORY = 'case_memory'          # cross-engine case recall (adk-aerospike, case_ prefix)
+SET_TRIAGE_LOG = 'triage_log'            # PK = {user_id}:{epoch_ms}; one record per Jev triage decision
 
 # Aerospike secondary index names (created on connect via create_secondary_indexes)
 IDX_TXN_DAY = 'idx_txn_day'
 IDX_INV_USER_ID = 'idx_inv_user_id'
 IDX_USER_WF_STATUS = 'idx_user_wf_status'
 IDX_FLAGGED_STATUS = 'idx_flagged_status'
+IDX_TRIAGE_USER_ID = 'idx_triage_user_id'
 
 # flagged_queue pointer list (loadgen contract — batch_get all flagged; not an Aerospike SI)
 #
@@ -184,6 +186,7 @@ class AerospikeService:
             (SET_INVESTIGATIONS, 'user_id', IDX_INV_USER_ID),
             (SET_USERS, 'wf_status', IDX_USER_WF_STATUS),
             (SET_FLAGGED_ACCOUNTS, 'status', IDX_FLAGGED_STATUS),
+            (SET_TRIAGE_LOG, 'user_id', IDX_TRIAGE_USER_ID),
         ]
         for set_name, bin_name, index_name in indexes:
             try:
@@ -2380,6 +2383,7 @@ class AerospikeService:
             "evaluations": self.truncate_set(SET_EVALUATIONS),
             "history": self.truncate_set(SET_HISTORY),
             "investigations": self.truncate_set(SET_INVESTIGATIONS),
+            "triage_log": self.truncate_set(SET_TRIAGE_LOG),
             # LangGraph checkpoint sets (INVESTIGATION_ENGINE=langgraph)
             "lg_checkpoints": self.truncate_set("lg_cp"),
             "lg_checkpoint_writes": self.truncate_set("lg_cp_w"),

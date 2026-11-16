@@ -49,10 +49,11 @@ flagged_account_service = FlaggedAccountService(graph_service)
 investigation_service: Optional[InvestigationService] = None
 feature_service: Optional[FeatureService] = None
 transaction_injector: Optional[TransactionInjector] = None
+triage_service = None  # services.triage.TriageService (tier 2: decision model)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global investigation_service, feature_service, transaction_injector
+    global investigation_service, feature_service, transaction_injector, triage_service
     
     # Startup
     logger.info("Starting Fraud Detection API")
@@ -77,6 +78,28 @@ async def lifespan(app: FastAPI):
         # Initialize transaction injector
         transaction_injector = TransactionInjector(graph_service, aerospike_service)
         logger.info("Transaction injector initialized")
+
+        # Tier 2: decision-model triage between predictive scoring and the agents
+        # (Strands Decider, Kev or TypeSafe Jev — any /v1/systemone server; see DECISION_MODEL)
+        from services.triage import TriageService, model_from_env
+        try:
+            decision_model = model_from_env()
+        except ValueError as e:
+            logger.error(f"Decision-model triage disabled: {e}")
+            decision_model = None
+        triage_service = TriageService(
+            aerospike_service,
+            decision_model,
+            concurrency=int(os.environ.get("DECISION_MODEL_CONCURRENCY") or os.environ.get("JEV_CONCURRENCY") or "16"),
+            last_detection=flagged_account_service.last_detection_job,
+            risk_threshold=lambda: flagged_account_service.get_config().get("risk_threshold", 50),
+        )
+        flagged_account_service.set_triage_service(triage_service)
+        logger.info(
+            "Decision-model triage: %s",
+            f"{decision_model.label} [{decision_model.mode}] {getattr(decision_model, 'base_url', '')}".strip()
+            if decision_model else "off",
+        )
     else:
         logger.warning("Aerospike KV service not available, using file-based storage")
     
@@ -1761,7 +1784,8 @@ def update_detection_config(
     schedule_enabled: Optional[bool] = Body(None, description="Enable/disable scheduled detection"),
     schedule_time: Optional[str] = Body(None, description="Schedule time in HH:MM format (24-hour)"),
     cooldown_days: Optional[int] = Body(None, ge=1, description="Cooldown period in days"),
-    risk_threshold: Optional[float] = Body(None, ge=0, le=100, description="Risk score threshold for flagging")
+    risk_threshold: Optional[float] = Body(None, ge=0, le=100, description="Risk score threshold for flagging"),
+    triage_enabled: Optional[bool] = Body(None, description="Run decision-model triage on newly flagged customers"),
 ):
     """Update detection configuration"""
     try:
@@ -1775,6 +1799,8 @@ def update_detection_config(
             config_update["cooldown_days"] = cooldown_days
         if risk_threshold is not None:
             config_update["risk_threshold"] = risk_threshold
+        if triage_enabled is not None:
+            config_update["triage_enabled"] = triage_enabled
         
         # Update config
         new_config = flagged_account_service.update_config(config_update)
@@ -1801,6 +1827,47 @@ def update_detection_config(
     except Exception as e:
         logger.error(f"❌ Failed to update detection config: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update config: {str(e)}")
+
+
+# ----------------------------------------------------------------------------------------------------------
+# Tier 2: decision-model triage (Strands Decider / Kev / Jev)
+# ----------------------------------------------------------------------------------------------------------
+
+def _require_triage():
+    if triage_service is None:
+        raise HTTPException(status_code=503, detail="Triage needs Aerospike to be connected.")
+    return triage_service
+
+
+@app.get("/triage/funnel")
+def get_triage_funnel():
+    """Counts at each tier: predictive scoring -> decision-model triage -> AI agents -> human."""
+    return _require_triage().funnel()
+
+
+@app.post("/triage/run")
+def run_triage(include_triaged: bool = Query(False, description="Re-triage pending customers that already have a decision")):
+    """Triage every pending flagged customer that has no decision yet (or all pending, if include_triaged)."""
+    svc = _require_triage()
+    if not svc.enabled:
+        raise HTTPException(status_code=409, detail="Decision-model triage is off (DECISION_MODEL=off).")
+    return svc.triage_many(svc.pending_user_ids(include_triaged=include_triaged))
+
+
+@app.post("/triage/{user_id}")
+def triage_one(user_id: str):
+    """Triage one flagged customer now and return the decision with the model's answers."""
+    svc = _require_triage()
+    result = svc.triage_user(user_id)
+    if "outcome" not in result:
+        raise HTTPException(status_code=404, detail=result.get("error", "Not triaged"))
+    return result
+
+
+@app.get("/triage/{user_id}")
+def get_triage_history(user_id: str, limit: int = Query(20, ge=1, le=200)):
+    """Triage decisions for a customer, newest first, each with the exact request sent to the model."""
+    return {"user_id": user_id, "decisions": _require_triage().history(user_id, limit=limit)}
 
 
 @app.get("/detection/history")

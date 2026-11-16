@@ -34,6 +34,7 @@ import { ActionApprovalCard } from '@/components/Flagged/Details/ActionApprovalC
 import { DecisionReviewDialog } from '@/components/Flagged/Details/DecisionReviewDialog'
 import { EvidenceSpecialists } from '@/components/Flagged/Details/EvidenceSpecialists'
 import { PriorCasesPanel } from '@/components/Flagged/Details/PriorCasesPanel'
+import TriagePanel from '@/components/Flagged/Details/TriagePanel'
 import { useInvestigation } from '@/hooks/useInvestigation'
 import { useAccountData } from '@/hooks/useAccountData'
 import { formatCurrency } from '@/lib/utils'
@@ -750,6 +751,9 @@ export default function FlaggedAccountDetailsPage() {
                             </CardContent>
                         </Card>
                     )}
+
+                    {/* Tier 2: decision-model triage that routed this case to the agents (or cleared it) */}
+                    {account.user_id && <TriagePanel userId={account.user_id} />}
 
                     <ReviewWorkflow
                         currentStep={currentStep}
