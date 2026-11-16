@@ -20,6 +20,21 @@ services:
       - INVESTIGATION_ENGINE=${INVESTIGATION_ENGINE:-adk}
       - ADK_MODEL=${ADK_MODEL:-gemini-2.0-flash}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      # AWS Strands engine (INVESTIGATION_ENGINE=strands): Claude on Amazon Bedrock. On EC2 the
+      # credentials come from the instance role (IMDSv2, hop limit 2), so no keys are passed here.
+      - AWS_REGION=${AWS_REGION:-us-west-2}
+      - STRANDS_SPECIALIST_MODEL=${STRANDS_SPECIALIST_MODEL:-us.anthropic.claude-sonnet-5-5}
+      - STRANDS_SPECIALIST_EFFORT=${STRANDS_SPECIALIST_EFFORT:-medium}
+      - STRANDS_INVESTIGATOR_MODEL=${STRANDS_INVESTIGATOR_MODEL:-us.anthropic.claude-opus-5-5}
+      - STRANDS_INVESTIGATOR_EFFORT=${STRANDS_INVESTIGATOR_EFFORT:-high}
+      - STRANDS_REPORT_MODEL=${STRANDS_REPORT_MODEL:-us.anthropic.claude-opus-5-5}
+      - STRANDS_REPORT_EFFORT=${STRANDS_REPORT_EFFORT:-medium}
+      # Tier-2 decision model: mock | decider | kev | jev | off (see .env.sample)
+      - DECISION_MODEL=${DECISION_MODEL:-mock}
+      - DECISION_MODEL_URL=${DECISION_MODEL_URL:-}
+      - DECISION_MODEL_NAME=${DECISION_MODEL_NAME:-}
+      - DECISION_MODEL_API_KEY=${DECISION_MODEL_API_KEY:-}
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY:-}
       # Graph/tool query bounds so a slow traversal can't hang an investigation.
       - GRAPH_QUERY_TIMEOUT_MS=${GRAPH_QUERY_TIMEOUT_MS:-30000}
       - GRAPH_READ_TIMEOUT_S=${GRAPH_READ_TIMEOUT_S:-45}
