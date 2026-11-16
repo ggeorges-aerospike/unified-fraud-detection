@@ -16,6 +16,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 PRIMARY_INDEX_BYTES_PER_RECORD = 64  # documented Aerospike primary-index entry size
 
+# Sets the load generator writes (loadgen KvModel: flat -> transactions_flat).
+STREAM_SETS = {"transactions_flat"}
+
+# `latencies:` buckets: the share of operations slower than 2^0 .. 2^16 ms, in this order.
+LATENCY_THRESHOLDS_MS = [2 ** i for i in range(17)]
+
 # Which funnel tier owns which set. Unknown sets fall into "other".
 TIERS: List[Dict[str, Any]] = [
     {"id": "graph", "label": "Graph (Aerospike Graph)",
@@ -28,6 +34,8 @@ TIERS: List[Dict[str, Any]] = [
      "match": lambda s: s in {"triage_log"}},
     {"id": "agents", "label": "AI agents (state & memory)",
      "match": lambda s: s in {"investigations", "case_memory"} or s.startswith(("strands_", "adk_", "lg_cp"))},
+    {"id": "stream", "label": "Transaction stream (load test)",
+     "match": lambda s: s in STREAM_SETS},
 ]
 
 
@@ -195,3 +203,93 @@ def collect(client: Any, namespace: str) -> Dict[str, Any]:
     build = (per_node("build") or [""])[0]
     edition = (per_node("edition") or [""])[0]
     return summarize(namespace, ns_stats, sets, sindexes, config, build, edition, node_count=len(ns_stats))
+
+
+# --- Live throughput ---------------------------------------------------------------------------
+
+def parse_latencies(text: str, namespace: str) -> Dict[str, Dict[str, Any]]:
+    """Parse a node's `latencies:` reply into {op: {"ops_per_sec": float, "over_ms": {1: pct, 8: pct, ...}}}.
+
+    Format per histogram: '{ns}-write:msec,<ops/sec>,<% >1ms>,<% >2ms>,...' and empty when idle.
+    The server computes ops/sec itself over its ticker interval, so no client-side sampling is needed.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    prefix = "{" + namespace + "}-"
+    for item in (text or "").strip().split(";"):
+        name, _, body = item.partition(":")
+        if not name.startswith(prefix):
+            continue
+        fields = body.split(",")
+        if len(fields) < 2 or fields[0] != "msec":
+            continue
+        try:
+            ops = float(fields[1])
+            pcts = [float(x) for x in fields[2:2 + len(LATENCY_THRESHOLDS_MS)]]
+        except ValueError:
+            continue
+        out[name[len(prefix):]] = {"ops_per_sec": ops, "over_ms": dict(zip(LATENCY_THRESHOLDS_MS, pcts))}
+    return out
+
+
+def summarize_throughput(
+    nodes: List[Dict[str, Any]],
+    replication_factor: int,
+) -> Dict[str, Any]:
+    """Cluster-wide live throughput from per-node latencies and set counts.
+
+    ``nodes``: [{"node": str, "latencies": parse_latencies(...), "sets": parse_records(...)}].
+    Ops/sec are client operations handled by each node as master (replica writes are not counted
+    again), so the cluster figure is the sum. Latency shares are weighted by each node's ops.
+    """
+    def op_total(op: str) -> float:
+        return sum(n["latencies"].get(op, {}).get("ops_per_sec", 0.0) for n in nodes)
+
+    def over(op: str, ms: int) -> Optional[float]:
+        total = op_total(op)
+        if not total:
+            return None
+        weighted = sum(n["latencies"].get(op, {}).get("ops_per_sec", 0.0) *
+                       n["latencies"].get(op, {}).get("over_ms", {}).get(ms, 0.0) for n in nodes)
+        return round(weighted / total, 2)
+
+    rf = max(1, replication_factor or 1)
+    stream_objects = sum(_num(r.get("objects")) for n in nodes for r in n["sets"] if r.get("set") in STREAM_SETS)
+    stream_data = sum(_num(r.get("data_used_bytes")) for n in nodes for r in n["sets"] if r.get("set") in STREAM_SETS)
+    return {
+        "writes_per_sec": round(op_total("write"), 1),
+        "reads_per_sec": round(op_total("read"), 1),
+        "write_over_ms": {ms: over("write", ms) for ms in (1, 8, 64)},
+        "read_over_ms": {ms: over("read", ms) for ms in (1, 8, 64)},
+        "nodes": sorted(
+            ({"node": n["node"],
+              "writes_per_sec": round(n["latencies"].get("write", {}).get("ops_per_sec", 0.0), 1),
+              "reads_per_sec": round(n["latencies"].get("read", {}).get("ops_per_sec", 0.0), 1)}
+             for n in nodes),
+            key=lambda d: d["node"]),
+        "stream": {
+            "sets": sorted(STREAM_SETS),
+            "records": stream_objects // rf,
+            "index_bytes": stream_objects * PRIMARY_INDEX_BYTES_PER_RECORD,
+            "data_bytes": stream_data,
+        },
+        "replication_factor": rf,
+    }
+
+
+def collect_throughput(client: Any, namespace: str) -> Dict[str, Any]:
+    """Query every node for its latencies and set counts and summarize the live write rate."""
+    def by_node(cmd: str) -> Dict[str, str]:
+        out = {}
+        for node, (err, resp) in (client.info_all(cmd) or {}).items():
+            if err is None and resp is not None:
+                out[str(node)] = resp.strip().split("\t", 1)[-1] if "\t" in resp else resp.strip()
+        return out
+
+    lat = by_node("latencies:")
+    sets = by_node(f"sets/{namespace}")
+    cfg = parse_kv(next(iter(by_node(f"get-config:context=namespace;id={namespace}").values()), ""))
+    nodes = [{"node": name,
+              "latencies": parse_latencies(lat.get(name, ""), namespace),
+              "sets": [r for r in parse_records(sets.get(name, "")) if r.get("ns", namespace) == namespace]}
+             for name in sorted(set(lat) | set(sets))]
+    return summarize_throughput(nodes, _num(cfg.get("replication-factor")))

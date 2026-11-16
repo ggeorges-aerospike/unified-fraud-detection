@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Cpu, Database, HardDrive, Info, Layers, RefreshCw } from 'lucide-react'
+import LiveThroughput from '@/components/Hma/LiveThroughput'
 
 interface Tier {
     id: string
@@ -196,6 +197,8 @@ export default function HmaPage() {
                     </span>
                 </div>
             )}
+
+            <LiveThroughput />
 
             {/* Headline tiles */}
             <div className="grid gap-4 md:grid-cols-3">

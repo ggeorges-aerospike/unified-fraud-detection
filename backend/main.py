@@ -1513,6 +1513,20 @@ def get_hma_stats():
         raise HTTPException(status_code=500, detail=f"Could not read Aerospike statistics: {e}")
 
 
+@app.get("/storage/throughput")
+def get_live_throughput():
+    """Live cluster ops/sec and latency shares (the server's own `latencies:` stats, summed across
+    nodes) plus how many load-test stream records the cluster currently holds."""
+    if not aerospike_service.is_connected():
+        raise HTTPException(status_code=503, detail="Aerospike is not connected.")
+    from services.hma_stats import collect_throughput
+    try:
+        return collect_throughput(aerospike_service.client, aerospike_service.namespace)
+    except Exception as e:
+        logger.error(f"Throughput stats failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not read Aerospike statistics: {e}")
+
+
 @app.get("/aerospike/stats")
 def get_aerospike_stats():
     """
