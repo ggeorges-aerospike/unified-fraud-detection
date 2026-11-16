@@ -50,6 +50,11 @@ GRAPH_SETUP='set -euo pipefail
 exec > >(tee -a /var/log/graph-bootstrap.log) 2>&1
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 docker pull "${AGS_IMAGE}"
+# A rebuilt cluster has a new seed: replace an ags container that points at the old one.
+if docker ps -a --format "{{.Names}}" | grep -qx ags && \
+   ! docker inspect ags --format "{{range .Config.Env}}{{println .}}{{end}}" | grep -qx "aerospike.client.host=${AS_SEED_IP}"; then
+  echo "ags points at an old seed; recreating"; docker rm -f ags >/dev/null
+fi
 if docker ps --format "{{.Names}}" | grep -qx ags; then echo "ags already running"
 elif docker ps -a --format "{{.Names}}" | grep -qx ags; then docker start ags
 else
@@ -83,11 +88,18 @@ cmd_create() {
     else log "skip $(loadgen_name "${i}") (already exists)"; fi
   done
   local all=(${new_graph[@]+"${new_graph[@]}"} ${new_loadgen[@]+"${new_loadgen[@]}"})
-  if [[ ${#all[@]} -eq 0 ]]; then log "fleet already has ${n} pair(s)"; cmd_status; return 0; fi
-  log "launched ${#new_graph[@]} graph + ${#new_loadgen[@]} loadgen x ${FLEET_INSTANCE_TYPE}"
-  wait_running "${all[@]}"; wait_ssm "${all[@]}"
+  if [[ ${#all[@]} -gt 0 ]]; then
+    log "launched ${#new_graph[@]} graph + ${#new_loadgen[@]} loadgen x ${FLEET_INSTANCE_TYPE}"
+    wait_running "${all[@]}"; wait_ssm "${all[@]}"
+  else
+    log "fleet already has ${n} pair(s); re-checking each graph instance's Aerospike seed"
+  fi
+  # Graph setup is idempotent and runs on every graph instance, so a rebuilt cluster (new seed)
+  # is picked up by re-running create.
+  local graphs=() i id
+  for i in $(seq 1 "${n}"); do id="$(instance_by_name graph "$(graph_name "${i}")")"; [[ -n "${id}" ]] && graphs+=("${id}"); done
   local envs="export AGS_IMAGE='${AGS_IMAGE}' AS_SEED_IP='${seed}' AEROSPIKE_NAMESPACE='${AEROSPIKE_NAMESPACE}'"
-  [[ ${#new_graph[@]} -gt 0 ]] && ssm_run 900 "${envs}"$'\n'"${GRAPH_SETUP}" "${new_graph[@]}"
+  [[ ${#graphs[@]} -gt 0 ]] && ssm_run 900 "${envs}"$'\n'"${GRAPH_SETUP}" "${graphs[@]}"
   [[ ${#new_loadgen[@]} -gt 0 ]] && ssm_run 900 "${LOADGEN_SETUP}" "${new_loadgen[@]}"
   log "create complete"
   cmd_status

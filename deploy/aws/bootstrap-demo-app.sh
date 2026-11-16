@@ -30,6 +30,11 @@ tar -xzf /tmp/app.tgz -C "${APP_DIR}" && rm -f /tmp/app.tgz
 mkdir -p "${APP_DIR}/data"
 if [[ "${DATA_SOURCE_MODE}" == local ]]; then
   GRAPH_HOST_ADDRESS="$(hostname -I | awk '{print $1}')"
+  # A rebuilt cluster has a new seed: replace an ags container that points at the old one.
+  if docker ps -a --format '{{.Names}}' | grep -qx ags && \
+     ! docker inspect ags --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -qx "aerospike.client.host=${AEROSPIKE_HOST}"; then
+    docker rm -f ags >/dev/null
+  fi
   if ! docker ps -a --format '{{.Names}}' | grep -qx ags; then
     docker run -d --name ags --restart unless-stopped -p 8182:8182 -v "${APP_DIR}/data:/data" \
       -e aerospike.client.host="${AEROSPIKE_HOST}" -e aerospike.client.namespace="${AS_NAMESPACE}" "${AGS_IMAGE}"
