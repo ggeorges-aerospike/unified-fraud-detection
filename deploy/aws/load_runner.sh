@@ -17,7 +17,7 @@
 # Examples:
 #   ./load_runner.sh create 10
 #   ./load_runner.sh start 10 paired 50000 3600 64 0
-#   KV_MODEL=flat BALANCES=false KV_TTL=600 ./load_runner.sh start 20 kv 0 300 64 0   # max Aerospike throughput
+#   KV_MODEL=flat BALANCES=false KV_TTL=600 ./load_runner.sh start 20 kv 0 300 64 1000000   # max Aerospike throughput
 #   ./load_runner.sh report 10
 #   ./load_runner.sh destroy 10
 #

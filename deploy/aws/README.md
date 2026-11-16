@@ -60,6 +60,7 @@ rm -f /tmp/features.conf
 aerolab cluster partition create -n demo-amd -t nvme -p 17,17,17,17,17
 aerolab cluster partition conf -n demo-amd --namespace=test --filter-type=nvme --configure=device
 aerolab conf adjust -n demo-amd set "namespace test.replication-factor" 2
+aerolab conf adjust -n demo-amd set "namespace test.nsup-period" 120   # aerolab default is 0, which rejects every TTL write
 aerolab aerospike start -n demo-amd
 aerolab cluster list
 ```
@@ -86,7 +87,7 @@ rm -f "$f"; unset PW
 ./create-demo-app.sh                                # builds + starts the app from the committed branch
 
 # throughput
-KV_MODEL=flat BALANCES=false KV_TTL=600 ./load_runner.sh start 4 kv 0 300 64 0
+KV_MODEL=flat BALANCES=false KV_TTL=600 ./load_runner.sh start 4 kv 0 300 64 1000000
 ./load_runner.sh report 4
 KV_MODEL=flat BALANCES=false KV_TTL=600 MODE=kv ./fleet-size-sweep.sh 12 300   # find saturation
 ```
@@ -134,7 +135,7 @@ print(g.call('aerospike.graphloader.admin.bulk-load.load')
        .with_('aerospike.graphloader.edges', '${base}/edges').next())
 PY
 docker run --rm --network host -v /tmp/load.py:/load.py python:3.12-slim \
-  bash -c 'pip -q install gremlinpython==3.7.1 >/dev/null && python /load.py'" \
+  bash -c 'pip -q install gremlinpython==3.7.1 aiohttp async_timeout >/dev/null && python /load.py'" \
   "$(instance_by_name graph "${DEPLOY_PREFIX}-graph-1")"
 LOAD
 ```

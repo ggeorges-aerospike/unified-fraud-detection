@@ -39,8 +39,12 @@ require_count() {
   [[ "${1:-}" =~ ^[0-9]+$ && "$1" -gt 0 ]] || die "count must be a positive integer, got: '${1:-}'"
 }
 
-account_id() { aws sts get-caller-identity --query Account --output text; }
-bucket_name() { echo "${BUCKET_BASE}-$(account_id)"; }
+account_id() {  # fails loudly (instead of naming things "...-") when credentials are missing or expired
+  local a; a="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || true
+  [[ "${a}" =~ ^[0-9]{12}$ ]] || die "AWS credentials missing or expired — refresh them and re-run"
+  echo "${a}"
+}
+bucket_name() { local a; a="$(account_id)" || exit 1; echo "${BUCKET_BASE}-${a}"; }
 
 # --- Resource lookups (everything is tagged Project=$DEPLOY_PREFIX) ---------------------------------
 
@@ -75,7 +79,9 @@ discover_aerospike() {
 #     and firewall inline). All tagged Project=$DEPLOY_PREFIX in the cluster's VPC. ---------------
 private_subnet_id() { lookup describe-subnets --filters "Name=tag:Project,Values=${DEPLOY_PREFIX}" "Name=tag:Tier,Values=private" --query 'Subnets[0].SubnetId'; }
 security_group_id() { lookup describe-security-groups --filters "Name=tag:Project,Values=${DEPLOY_PREFIX}" "Name=group-name,Values=${DEPLOY_PREFIX}-sg" --query 'SecurityGroups[0].GroupId'; }
-_tags() { echo "ResourceType=$1,Tags=[{Key=Project,Value=${DEPLOY_PREFIX}},{Key=Name,Value=$2}${3:+,$3}]"; }
+_tags() {  # _tags <resource-type> <name> [extra tag as JSON] -> --tag-specifications JSON
+  echo "[{\"ResourceType\":\"$1\",\"Tags\":[{\"Key\":\"Project\",\"Value\":\"${DEPLOY_PREFIX}\"},{\"Key\":\"Name\",\"Value\":\"$2\"}${3:+,$3}]}]"
+}
 
 # Private subnet in the cluster's zone (no public IPs — the AWS counterpart of GCP's --no-address),
 # egress through a NAT gateway in the zone's default public subnet, a free S3 gateway endpoint, and
@@ -88,7 +94,7 @@ ensure_network() {
   log "creating the private network in ${vpc} / ${AS_AZ} (once; NAT gateway ~\$0.045/hr while it exists)"
   if [[ -z "${SUBNET_ID}" ]]; then
     SUBNET_ID="$(aws ec2 create-subnet --vpc-id "${vpc}" --cidr-block "${PRIVATE_SUBNET_CIDR}" --availability-zone "${AS_AZ}" \
-      --tag-specifications "$(_tags subnet "${DEPLOY_PREFIX}-private" "{Key=Tier,Value=private}")" --query Subnet.SubnetId --output text)"
+      --tag-specifications "$(_tags subnet "${DEPLOY_PREFIX}-private" '{"Key":"Tier","Value":"private"}')" --query Subnet.SubnetId --output text)"
   fi
   public="$(lookup describe-subnets --filters "Name=vpc-id,Values=${vpc}" "Name=availability-zone,Values=${AS_AZ}" \
     "Name=map-public-ip-on-launch,Values=true" --query 'Subnets[0].SubnetId')"
@@ -140,8 +146,8 @@ teardown_network() {
 
 # Private, encrypted bucket for artifacts and the dataset.
 ensure_bucket() {
-  local b; b="$(bucket_name)"
-  aws s3api head-bucket --bucket "${b}" 2>/dev/null && return 0
+  local b; b="$(bucket_name)" || exit 1
+  aws s3api head-bucket --bucket "${b}" >/dev/null 2>&1 && return 0
   aws s3api create-bucket --bucket "${b}" --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
   aws s3api put-public-access-block --bucket "${b}" \
     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
@@ -266,7 +272,7 @@ ssm_run_file() {  # ssm_run_file <timeout> <file> "<env exports>" <instance-id>.
 # Upload a local file to the project bucket; prints the s3:// URI.
 stage_file() {  # stage_file <local> <key>
   ensure_bucket
-  local uri="s3://$(bucket_name)/$2"
+  local b uri; b="$(bucket_name)" || exit 1; uri="s3://${b}/$2"
   aws s3 cp --only-show-errors "$1" "${uri}"
   echo "${uri}"
 }
