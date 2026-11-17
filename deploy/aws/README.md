@@ -117,29 +117,26 @@ bash -c 'source ./lib.sh; ssm_run 60 "tail -n 20 /data/pipeline.log" $(instance_
 bash -c 'source ./lib.sh; aws ec2 terminate-instances --instance-ids $(instance_by_name generator ${DEPLOY_PREFIX}-generator)'
 ```
 
-Bulk-load it into Aerospike Graph through graph instance 1, with the same Gremlin call the app
-uses (`backend/services/graph_service.py`) and s3:// paths read through the instance role. Confirm
-on the first run that this Graph Service version accepts s3:// paths with the default credential
-chain.
+Bulk-load it with `emr-load.sh`, which runs the distributed Aerospike Graph bulk loader (Spark)
+on an EMR cluster that terminates itself when the load ends. It needs the aerolab cluster up and
+the loader jar staged once at `s3://<bucket>/loader/aerospike-graph-bulk-loader-3.3.3.jar`.
 
 ```bash
-bash <<'LOAD'
-source ./lib.sh
-base="s3://$(bucket_name)/1B/graph_csv"
-ssm_run 300 "cat > /tmp/load.py <<'PY'
-from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
-from gremlin_python.process.anonymous_traversal import traversal
-g = traversal().with_remote(DriverRemoteConnection('ws://localhost:${GRAPH_PORT}/gremlin', 'g'))
-print(g.call('aerospike.graphloader.admin.bulk-load.load')
-       .with_('aerospike.graphloader.vertices', '${base}/vertices')
-       .with_('aerospike.graphloader.edges', '${base}/edges').next())
-PY
-docker run --rm --network host -v /tmp/load.py:/load.py python:3.12-slim \
-  bash -c 'pip -q install gremlinpython==3.7.1 aiohttp async_timeout >/dev/null && python /load.py'" \
-  "$(instance_by_name graph "${DEPLOY_PREFIX}-graph-1")"
-LOAD
+bash emr-load.sh 1B          # prints the EMR cluster id
+aws emr list-steps --cluster-id <id> --query 'Steps[0].Status.State'   # RUNNING → COMPLETED
 ```
-(Swap `bulk-load.load` and its `.with_()` lines for `bulk-load.status` to follow progress.)
+
+- **Size the cluster first.** The 1B dataset (3B vertices, 5B edges) takes ~7.0B records with
+  RF 2: ~4.8 TB of NVMe and ~450 GB of index RAM. 5 × x8aedz.6xlarge holds it at ~59% NVMe fill.
+- **Expect ~3 hours** with the default 8 × m8a.8xlarge workers (`LOADER_WORKERS`, `LOADER_TYPE`
+  override them), at ~$18/hr for EMR.
+- **Load into an empty namespace.** The loader refuses `-clear_existing_data` on an empty
+  database, so the script doesn't pass it.
+- **Progress** is in the step's driver log at
+  `s3://<bucket>/loader/emr-logs/<cluster-id>/steps/<step-id>/stderr.gz` (uploaded every few
+  minutes); it lists each loader phase and the vertex and edge totals when done.
+- **Afterwards:** restart the Graph Service on the graph instances (`./load_runner.sh create <n>`
+  re-runs their setup), and delete `s3://<bucket>/1B/loader-tmp/` (~485 GB of loader temp files).
 
 ## Sizing: set `KV_TTL` to the cluster
 
@@ -174,8 +171,8 @@ bash -c 'source ./lib.sh; teardown_network'        # NAT gateway, subnet, securi
 aerolab cluster destroy -n demo-amd
 ```
 
-The bucket (dataset), secrets and IAM roles cost nothing idle and are kept; delete them by hand if
-you mean to.
+The bucket (dataset), secrets and IAM roles are kept; delete them by hand if you mean to. Idle,
+they cost little: the 1B CSVs (~950 GB) are ~$22/month in S3 Standard.
 
 ## Things to know
 
